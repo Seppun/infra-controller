@@ -114,6 +114,7 @@ mod sku;
 mod spx_partition;
 mod ssh;
 mod switch;
+mod table_utils;
 mod tenant;
 mod tenant_keyset;
 #[cfg(test)]
