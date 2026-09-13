@@ -19,6 +19,212 @@ use std::net::IpAddr;
 
 use mac_address::MacAddress;
 
+const REDFISH_ERROR_MESSAGE_LIMIT: usize = 1024;
+const UNRECOGNIZED_REDFISH_ERROR_RESPONSE: &str = "<unrecognized Redfish error response>";
+
+/// Logs the diagnostic fields shared by HTTP failures from both Redfish clients.
+///
+/// The complete response body and DMTF `MessageArgs` are deliberately excluded.
+/// Only a bounded message extracted from the DMTF error envelope is recorded,
+/// after masking sensitive values supplied by the caller.
+pub fn log_redfish_http_error<'a>(
+    backend: &str,
+    operation: &str,
+    url: &str,
+    http_status: u16,
+    response_body: &str,
+    sensitive_values: impl IntoIterator<Item = &'a str>,
+) {
+    let error = redfish_error_message_for_log(response_body, sensitive_values);
+    tracing::warn!(
+        backend,
+        operation,
+        url = %url,
+        http_status,
+        error = %error,
+        "external call failed"
+    );
+}
+
+/// Redacts sensitive values from a Redfish response body before it is returned
+/// to code that may format or log the complete HTTP error.
+///
+/// Valid JSON is decoded before masking its string values and object keys, so
+/// escaped forms of a credential cannot bypass redaction. Non-JSON responses
+/// retain their original formatting and receive best-effort literal masking.
+pub fn redact_redfish_response_body<'a>(
+    response_body: &str,
+    sensitive_values: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let sensitive_values = sensitive_values
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if sensitive_values.is_empty() {
+        return response_body.to_string();
+    }
+
+    let Ok(mut response) = serde_json::from_str::<serde_json::Value>(response_body) else {
+        return mask_all(response_body, sensitive_values);
+    };
+    if !redact_json_strings(&mut response, &sensitive_values) {
+        return response_body.to_string();
+    }
+    serde_json::to_string(&response)
+        .unwrap_or_else(|_| UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string())
+}
+
+/// Redacts JSON string values and object keys, returning whether anything changed.
+fn redact_json_strings(value: &mut serde_json::Value, sensitive_values: &[&str]) -> bool {
+    match value {
+        serde_json::Value::String(value) => {
+            let redacted = mask_all(value, sensitive_values.iter().copied());
+            if redacted == *value {
+                false
+            } else {
+                *value = redacted;
+                true
+            }
+        }
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for value in values {
+                changed |= redact_json_strings(value, sensitive_values);
+            }
+            changed
+        }
+        serde_json::Value::Object(values) => {
+            let mut changed = false;
+            let original = std::mem::take(values);
+            for (key, mut value) in original {
+                let redacted_key = mask_all(&key, sensitive_values.iter().copied());
+                changed |= redacted_key != key;
+                changed |= redact_json_strings(&mut value, sensitive_values);
+                insert_json_object_entry(values, redacted_key, value);
+            }
+            changed
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
+/// Keeps every diagnostic value if distinct sensitive keys collapse to the
+/// same redacted spelling.
+fn insert_json_object_entry(
+    values: &mut serde_json::Map<String, serde_json::Value>,
+    key: String,
+    value: serde_json::Value,
+) {
+    if !values.contains_key(&key) {
+        values.insert(key, value);
+        return;
+    }
+
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{key}_{suffix}");
+        if !values.contains_key(&candidate) {
+            values.insert(candidate, value);
+            return;
+        }
+        suffix += 1;
+    }
+}
+
+/// Extracts a bounded, log-safe message from a DMTF Redfish error response.
+fn redfish_error_message_for_log<'a>(
+    response_body: &str,
+    sensitive_values: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let message = extract_redfish_error_message(response_body)
+        .unwrap_or_else(|| UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string());
+    truncate_redfish_error_message(mask_all(&message, sensitive_values))
+}
+
+fn extract_redfish_error_message(response_body: &str) -> Option<String> {
+    let response: serde_json::Value = serde_json::from_str(response_body).ok()?;
+    let error = response.get("error")?.as_object()?;
+
+    if let Some(extended_info) = error
+        .get("@Message.ExtendedInfo")
+        .and_then(serde_json::Value::as_array)
+    {
+        let messages = extended_info
+            .iter()
+            .filter_map(|entry| {
+                let entry = entry.as_object()?;
+                usable_redfish_message(entry.get("Message"))
+                    .or_else(|| usable_redfish_message(entry.get("MessageId")))
+            })
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            return Some(messages.join("; "));
+        }
+    }
+
+    usable_redfish_message(error.get("message"))
+        .or_else(|| usable_redfish_message(error.get("code")))
+        .map(str::to_string)
+}
+
+fn usable_redfish_message(value: Option<&serde_json::Value>) -> Option<&str> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+}
+
+fn truncate_redfish_error_message(mut message: String) -> String {
+    const ELLIPSIS: &str = "…";
+
+    if message.len() <= REDFISH_ERROR_MESSAGE_LIMIT {
+        return message;
+    }
+
+    let mut end = REDFISH_ERROR_MESSAGE_LIMIT - ELLIPSIS.len();
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message.truncate(end);
+    message.push_str(ELLIPSIS);
+    message
+}
+
+/// Masks the union of all sensitive-value matches, including overlapping ones.
+fn mask_all<'a>(text: &str, sensitive_values: impl IntoIterator<Item = &'a str>) -> String {
+    const REDACTED: &str = "REDACTED";
+    let mut ranges: Vec<(usize, usize)> = sensitive_values
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .flat_map(|value| {
+            let value = value.as_bytes();
+            (0..=text.len().saturating_sub(value.len()))
+                .filter(move |&start| text.as_bytes()[start..].starts_with(value))
+                .map(move |start| (start, start + value.len()))
+        })
+        .collect();
+    ranges.sort_unstable();
+
+    let mut redacted = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut index = 0;
+    while index < ranges.len() {
+        let (start, mut end) = ranges[index];
+        index += 1;
+        while index < ranges.len() && ranges[index].0 <= end {
+            end = end.max(ranges[index].1);
+            index += 1;
+        }
+        redacted.push_str(&text[cursor..start]);
+        redacted.push_str(REDACTED);
+        cursor = end;
+    }
+    redacted.push_str(&text[cursor..]);
+    redacted
+}
+
 /// `parse_uri_host_ip` parses an IPv4 literal or a bare/bracketed IPv6 literal.
 ///
 /// `http::Uri::host` retains IPv6 brackets, while other callers can provide
@@ -54,9 +260,173 @@ pub struct BmcAccessInfo {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::value_scenarios;
+    use carbide_instrument::testing::{CapturedFieldKind, capture_logs};
+    use carbide_test_support::{Check, check_values, value_scenarios};
 
-    use super::{format_forwarded_host_parameter, parse_uri_host_ip};
+    use super::*;
+
+    #[test]
+    fn redfish_error_message_uses_dmtf_fallbacks_without_message_arguments() {
+        check_values(
+            [
+                Check {
+                    scenario: "extended information takes precedence",
+                    input: r#"{
+                        "error": {
+                            "code": "Base.1.0.FallbackCode",
+                            "message": "fallback message",
+                            "@Message.ExtendedInfo": [
+                                {
+                                    "Message": "first detail",
+                                    "MessageId": "Base.1.0.Ignored",
+                                    "MessageArgs": ["must-not-be-logged"]
+                                },
+                                {
+                                    "Message": "  ",
+                                    "MessageId": "Base.1.0.SecondDetail"
+                                }
+                            ]
+                        }
+                    }"#,
+                    expect: "first detail; Base.1.0.SecondDetail".to_string(),
+                },
+                Check {
+                    scenario: "top-level message fallback",
+                    input: r#"{"error":{"message":"top-level message","code":"Code"}}"#,
+                    expect: "top-level message".to_string(),
+                },
+                Check {
+                    scenario: "top-level code fallback",
+                    input: r#"{"error":{"code":"Base.1.0.CodeOnly"}}"#,
+                    expect: "Base.1.0.CodeOnly".to_string(),
+                },
+                Check {
+                    scenario: "malformed response",
+                    input: "not JSON",
+                    expect: UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string(),
+                },
+            ],
+            |response| redfish_error_message_for_log(response, std::iter::empty()),
+        );
+    }
+
+    #[test]
+    fn redfish_error_message_redacts_decoded_and_overlapping_sensitive_values() {
+        let response = r#"{
+            "error": {
+                "@Message.ExtendedInfo": [{
+                    "Message": "password p\u00e4ss\/\uD83D\uDD11 and abcdefghi rejected"
+                }]
+            }
+        }"#;
+
+        assert_eq!(
+            redfish_error_message_for_log(response, ["päss/🔑", "abcdef", "defghi"]),
+            "password REDACTED and REDACTED rejected"
+        );
+    }
+
+    #[test]
+    fn redfish_response_body_redaction_uses_decoded_json_strings() {
+        let response = r#"{
+            "error": {
+                "@Message.ExtendedInfo": [{
+                    "Message": "credential s\u0065cret rejected",
+                    "MessageArgs": ["s\u0065cret"],
+                    "credential-s\u0065cret": "rejected",
+                    "s\u0065cret": "first key",
+                    "s\u0065crets\u0065cret": "second key"
+                }]
+            }
+        }"#;
+
+        let redacted = redact_redfish_response_body(response, ["secret"]);
+        let redacted: serde_json::Value =
+            serde_json::from_str(&redacted).expect("redacted response remains valid JSON");
+
+        assert_eq!(
+            redacted["error"]["@Message.ExtendedInfo"][0]["Message"],
+            "credential REDACTED rejected"
+        );
+        assert_eq!(
+            redacted["error"]["@Message.ExtendedInfo"][0]["MessageArgs"][0],
+            "REDACTED"
+        );
+        assert_eq!(
+            redacted["error"]["@Message.ExtendedInfo"][0]["credential-REDACTED"],
+            "rejected"
+        );
+        assert_eq!(
+            redacted["error"]["@Message.ExtendedInfo"][0]["REDACTED"],
+            "first key"
+        );
+        assert_eq!(
+            redacted["error"]["@Message.ExtendedInfo"][0]["REDACTED_2"],
+            "second key"
+        );
+    }
+
+    #[test]
+    fn redfish_response_body_redaction_preserves_an_unmatched_body() {
+        let response = "{\n  \"error\": {\"message\": \"ordinary failure\"}\n}";
+
+        assert_eq!(redact_redfish_response_body(response, ["secret"]), response);
+    }
+
+    #[test]
+    fn redfish_response_body_redaction_masks_plain_text_fallback() {
+        assert_eq!(
+            redact_redfish_response_body("credential secret rejected", ["secret"]),
+            "credential REDACTED rejected"
+        );
+    }
+
+    #[test]
+    fn redfish_error_message_has_a_utf8_safe_length_limit() {
+        let response = serde_json::json!({
+            "error": {"message": "é".repeat(REDFISH_ERROR_MESSAGE_LIMIT)}
+        })
+        .to_string();
+
+        let message = redfish_error_message_for_log(&response, std::iter::empty());
+
+        assert_eq!(message.len(), REDFISH_ERROR_MESSAGE_LIMIT - 1);
+        assert!(message.ends_with('…'));
+    }
+
+    #[test]
+    fn redfish_http_error_log_has_the_canonical_structured_fields() {
+        let logs = capture_logs(|| {
+            log_redfish_http_error(
+                "redfish",
+                "set_boot_order_dpu_first",
+                "https://bmc.example/redfish/v1/Systems/1",
+                500,
+                r#"{
+                    "error": {
+                        "message": "fallback",
+                        "@Message.ExtendedInfo": [{"Message": "internal service error"}]
+                    }
+                }"#,
+                std::iter::empty(),
+            );
+        });
+
+        let log = logs.first().expect("one Redfish failure log");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(log.level, tracing::Level::WARN);
+        assert_eq!(log.message, "external call failed");
+        assert_eq!(log.field("backend"), Some("redfish"));
+        assert_eq!(log.field("operation"), Some("set_boot_order_dpu_first"));
+        assert_eq!(
+            log.field("url"),
+            Some("https://bmc.example/redfish/v1/Systems/1")
+        );
+        assert_eq!(log.field("http_status"), Some("500"));
+        assert_eq!(log.field_kind("http_status"), Some(CapturedFieldKind::U64));
+        assert_eq!(log.field("error"), Some("internal service error"));
+        assert_eq!(log.field("error_message"), None);
+    }
 
     #[test]
     fn uri_host_parser_accepts_bare_and_bracketed_ip_literals() {
