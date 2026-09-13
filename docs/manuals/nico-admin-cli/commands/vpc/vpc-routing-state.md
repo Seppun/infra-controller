@@ -4,8 +4,8 @@ _[Network commands](../../network.md) › [vpc](./vpc.md) › **routing-state**_
 
 ## NAME
 
-nico-admin-cli-vpc-routing-state - Inspect the VPCs persisted routing
-profile and VNI allocations
+nico-admin-cli-vpc-routing-state - Inspect persisted routing profile and
+VNI allocations for a VPC
 
 ## SYNOPSIS
 
@@ -14,8 +14,8 @@ profile and VNI allocations
 
 ## DESCRIPTION
 
-Inspect the VPCs persisted routing profile, observed version, active
-VNI, and retained allocation. Each RPC attempt uses the client request
+Inspect the persisted routing profile, observed version, active VNI, and
+retained allocation for a VPC. Each RPC attempt uses the client request
 timeout (300 seconds by default, configurable with
 FORGE_CLIENT_REQUEST_TIMEOUT_SECS), including connection setup and
 response reads. This is not the effective routing profile or evidence of
@@ -29,10 +29,6 @@ before vpc. CSV output is unsupported.
 
 **--extended**  
 Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 **--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
 Sort output by specified field\
