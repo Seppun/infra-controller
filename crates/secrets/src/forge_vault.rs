@@ -1145,10 +1145,16 @@ enum EnumerationMode {
     Strict,
 }
 
-fn vault_path_is_excluded(path: &str, excluded_prefixes: &[CredentialPrefix]) -> bool {
-    excluded_prefixes
+fn vault_path_exclusions(
+    path: &str,
+    excluded_prefixes: &[CredentialPrefix],
+    excluded_paths: &[&str],
+) -> (bool, bool) {
+    let excluded_by_prefix = excluded_prefixes
         .iter()
-        .any(|prefix| path.starts_with(prefix.as_str()))
+        .any(|prefix| path.starts_with(prefix.as_str()));
+    let excluded_exactly = excluded_paths.contains(&path);
+    (excluded_by_prefix, excluded_exactly)
 }
 
 async fn list_vault_path(
@@ -1265,8 +1271,8 @@ impl ForgeVaultClient {
         path_prefix: &str,
         mode: EnumerationMode,
     ) -> Result<Vec<String>, SecretsError> {
-        let (paths, _) = self
-            .list_secrets_for_path_excluding(path_prefix, mode, &[])
+        let (paths, _, _) = self
+            .list_secrets_for_path_excluding(path_prefix, mode, &[], &[])
             .await?;
         Ok(paths)
     }
@@ -1276,13 +1282,15 @@ impl ForgeVaultClient {
         path_prefix: &str,
         mode: EnumerationMode,
         excluded_prefixes: &[CredentialPrefix],
-    ) -> Result<(Vec<String>, bool), SecretsError> {
+        excluded_paths: &[&str],
+    ) -> Result<(Vec<String>, bool, bool), SecretsError> {
         let vault_client = self.vault_client().await?;
         let mount = &self.vault_client_config.kv_mount_location;
 
         let mut paths = Vec::new();
         let mut stack = vec![path_prefix.to_string()];
         let mut excluded_prefix_found = false;
+        let mut excluded_path_found = false;
 
         while let Some(dir) = stack.pop() {
             let Some(entries) = list_vault_path(vault_client.deref(), mount, &dir, mode).await?
@@ -1297,8 +1305,11 @@ impl ForgeVaultClient {
                 } else {
                     format!("{dir}{entry}")
                 };
-                if vault_path_is_excluded(&full, excluded_prefixes) {
-                    excluded_prefix_found = true;
+                let (excluded_by_prefix, excluded_exactly) =
+                    vault_path_exclusions(&full, excluded_prefixes, excluded_paths);
+                excluded_prefix_found |= excluded_by_prefix;
+                excluded_path_found |= excluded_exactly;
+                if excluded_by_prefix || excluded_exactly {
                     continue;
                 }
 
@@ -1310,7 +1321,7 @@ impl ForgeVaultClient {
             }
         }
 
-        Ok((paths, excluded_prefix_found))
+        Ok((paths, excluded_prefix_found, excluded_path_found))
     }
 
     /// get_secrets returns all secrets in the KV mount (paths plus
@@ -1340,11 +1351,31 @@ impl ForgeVaultClient {
         &self,
         excluded_prefixes: &[CredentialPrefix],
     ) -> Result<(Vec<(String, Credentials)>, bool), SecretsError> {
-        let (paths, excluded_prefix_found) = self
-            .list_secrets_for_path_excluding("", EnumerationMode::Strict, excluded_prefixes)
+        let (secrets, excluded_prefix_found, _) = self
+            .get_secrets_strict_excluding(excluded_prefixes, &[])
+            .await?;
+        Ok((secrets, excluded_prefix_found))
+    }
+
+    /// Returns all secrets outside the excluded prefixes and exact paths,
+    /// failing on the first list or read error. Excluded credentials are not
+    /// read. The booleans report whether a prefix and exact path, respectively,
+    /// were found during enumeration.
+    pub async fn get_secrets_strict_excluding(
+        &self,
+        excluded_prefixes: &[CredentialPrefix],
+        excluded_paths: &[&str],
+    ) -> Result<(Vec<(String, Credentials)>, bool, bool), SecretsError> {
+        let (paths, excluded_prefix_found, excluded_path_found) = self
+            .list_secrets_for_path_excluding(
+                "",
+                EnumerationMode::Strict,
+                excluded_prefixes,
+                excluded_paths,
+            )
             .await?;
         let secrets = self.read_secrets(&paths, EnumerationMode::Strict).await?;
-        Ok((secrets, excluded_prefix_found))
+        Ok((secrets, excluded_prefix_found, excluded_path_found))
     }
 
     /// get_secrets_for_prefix returns all secrets
@@ -1699,7 +1730,7 @@ mod tests {
         DedicatedVaultConfig, ForgeVaultAuthenticationType, ForgeVaultClientConfig, SpiffeIdentity,
         VaultConfig, VaultTokenRefreshWindowObserved, create_dedicated_vault_client,
         create_vault_client_settings, machine_spiffe_uri, service_account_role_name_from_jwt,
-        vault_path_is_excluded,
+        vault_path_exclusions,
     };
     use crate::credentials::CredentialPrefix;
 
@@ -1711,7 +1742,24 @@ mod tests {
             ("machines/bmc/site/root", false),
         ] {
             assert_eq!(
-                vault_path_is_excluded(path, &[CredentialPrefix::UfmAuth]),
+                vault_path_exclusions(path, &[CredentialPrefix::UfmAuth], &[]).0,
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_vault_path_exclusion_does_not_cover_versioned_children() {
+        let excluded = "machines/bmc/site/root";
+
+        for (path, expected) in [
+            (excluded, true),
+            ("machines/bmc/site/root/", false),
+            ("machines/bmc/site/root/v1", false),
+        ] {
+            assert_eq!(
+                vault_path_exclusions(path, &[], &[excluded]).1,
                 expected,
                 "{path}"
             );

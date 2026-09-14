@@ -1794,6 +1794,9 @@ jobs:
       - name: Test observability collector addresses
         run: bash helm-prereqs/tests/observability-collector-addresses_test.sh
 
+      - name: Test DPF single Core deployment
+        run: bash helm-prereqs/tests/setup-dpf-single-core-deploy_test.sh
+
   build-push-helm-prereqs-chart:
     needs:
       - prepare
