@@ -15,9 +15,9 @@ automatically; a script that hard-codes a hostname instead does not.
 |---|---|---|
 | `${base-url}` | The boot-artifact tree, `…/public/blobs/` | Chaining to a kernel, initrd, or EFI image NICo serves |
 | `${tenant-cloudinit-url}` | The NoCloud datasource for an assigned instance | `ds=nocloud-net;s=${tenant-cloudinit-url}` in an OS install script |
-| `${dpu-cloudinit-url}` | The BlueField kickstart endpoint | Internal — DPU provisioning only |
-| `${scout-cloudinit-url}` | The discovery OS's NoCloud datasource | Internal — set on the Scout kernel command line only |
-| `${cloudinit-url}` | Alias of `${tenant-cloudinit-url}` | **Deprecated** — see below |
+| `${dpu-cloudinit-url}` | The BlueField kickstart endpoint | Internal—DPU provisioning only |
+| `${scout-cloudinit-url}` | The discovery OS's NoCloud datasource | Internal—set on the Scout kernel command line only |
+| `${cloudinit-url}` | Alias of `${tenant-cloudinit-url}` | **Deprecated**—refer to [Deprecations](#deprecations). |
 
 `${dpu-cloudinit-url}` and `${scout-cloudinit-url}` are listed for completeness. They serve NICo's own
 provisioning flows, and referencing them from a tenant script will not do anything useful.
