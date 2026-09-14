@@ -40,7 +40,7 @@ document, and the boot continues.
 
 ## Deprecations
 
-### `${cloudinit-url}`
+### ${cloudinit-url} Variable
 
 **Deprecated in favor of `${tenant-cloudinit-url}`. Update scripts that use it.**
 
