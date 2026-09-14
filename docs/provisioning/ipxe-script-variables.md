@@ -33,10 +33,10 @@ initrd ${base-url}/internal/x86_64/initrd
 boot
 ```
 
-The datasource that `${tenant-cloudinit-url}` points at serves the `user-data`, `meta-data`,
-`vendor-data`, and `network-config` documents cloud-init's NoCloud datasource expects. `user-data` is
-the `userData` value on the machine's operating system; when none is set, an empty document is served
-rather than an error, so a boot without user-data still completes.
+The `${tenant-cloudinit-url}` data source serves the `user-data`, `meta-data`, `vendor-data`, and
+`network-config` documents that the cloud-init NoCloud data source expects. `user-data` contains the
+`userData` value from the machine's operating system. If no value is set, NICo serves an empty
+document, and the boot continues.
 
 ## Deprecations
 
