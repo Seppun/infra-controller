@@ -1142,7 +1142,12 @@ mod tests {
 
         assert_eq!(
             service_names,
-            ["FmdsConfigService", "Forge", "NMX_Controller"]
+            [
+                "ConsoleLogService",
+                "FmdsConfigService",
+                "Forge",
+                "NMX_Controller",
+            ]
         );
     }
 
