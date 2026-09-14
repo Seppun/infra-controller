@@ -106,6 +106,9 @@ async fn build_client(
     url: &url::Url,
     tls: &TlsConfig,
 ) -> eyre::Result<ConsoleLogServiceClient<Channel>> {
+    if url.scheme() != "https" {
+        return Err(eyre::eyre!("ssh_console_url must use https"));
+    }
     let domain = url
         .host()
         .ok_or_else(|| eyre::eyre!("ssh_console_url has no DNS host"))?;
@@ -202,5 +205,27 @@ mod tests {
         .err()
         .expect("TLS configuration is required");
         assert!(error.to_string().contains("requires TLS configuration"));
+    }
+
+    #[tokio::test]
+    async fn configured_source_requires_https_url() {
+        let mut join_set = JoinSet::new();
+        let cancel_token = CancellationToken::new();
+        let error = build_source(
+            Some(&"http://ssh-console.example:1079".parse().unwrap()),
+            Some(TlsConfig {
+                root_cafile_path: "root_cafile_path".to_string(),
+                identity_pemfile_path: "identity_pemfile_path".to_string(),
+                identity_keyfile_path: "identity_keyfile_path".to_string(),
+                admin_root_cafile_path: "admin_root_cafile_path".to_string(),
+            })
+            .as_ref(),
+            &mut join_set,
+            cancel_token.clone(),
+        )
+        .await
+        .err()
+        .expect("HTTPS is required");
+        assert!(error.to_string().contains("must use https"));
     }
 }
