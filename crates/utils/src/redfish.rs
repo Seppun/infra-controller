@@ -20,6 +20,7 @@ use std::net::IpAddr;
 use mac_address::MacAddress;
 
 const REDFISH_ERROR_MESSAGE_LIMIT: usize = 1024;
+const REDACTED: &str = "REDACTED";
 const UNRECOGNIZED_REDFISH_ERROR_RESPONSE: &str = "<unrecognized Redfish error response>";
 
 /// Logs the diagnostic fields shared by HTTP failures from both Redfish clients.
@@ -49,9 +50,10 @@ pub fn log_redfish_http_error<'a>(
 /// Redacts sensitive values from a Redfish response body before it is returned
 /// to code that may format or log the complete HTTP error.
 ///
-/// Valid JSON is decoded before masking its string values and object keys, so
-/// escaped forms of a credential cannot bypass redaction. Non-JSON responses
-/// retain their original formatting and receive best-effort literal masking.
+/// Valid JSON is decoded before masking its string values, object keys, and
+/// matching non-string scalar values, so escaped or unquoted forms of a
+/// credential cannot bypass redaction. Non-JSON responses retain their original
+/// formatting and receive best-effort literal masking.
 pub fn redact_redfish_response_body<'a>(
     response_body: &str,
     sensitive_values: impl IntoIterator<Item = &'a str>,
@@ -67,15 +69,29 @@ pub fn redact_redfish_response_body<'a>(
     let Ok(mut response) = serde_json::from_str::<serde_json::Value>(response_body) else {
         return mask_all(response_body, sensitive_values);
     };
-    if !redact_json_strings(&mut response, &sensitive_values) {
+    let sensitive_scalars = sensitive_values
+        .iter()
+        .filter_map(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .filter(|value| {
+            matches!(
+                value,
+                serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    if !redact_json_values(&mut response, &sensitive_values, &sensitive_scalars) {
         return response_body.to_string();
     }
     serde_json::to_string(&response)
         .unwrap_or_else(|_| UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string())
 }
 
-/// Redacts JSON string values and object keys, returning whether anything changed.
-fn redact_json_strings(value: &mut serde_json::Value, sensitive_values: &[&str]) -> bool {
+/// Redacts JSON values and object keys, returning whether anything changed.
+fn redact_json_values(
+    value: &mut serde_json::Value,
+    sensitive_values: &[&str],
+    sensitive_scalars: &[serde_json::Value],
+) -> bool {
     match value {
         serde_json::Value::String(value) => {
             let redacted = mask_all(value, sensitive_values.iter().copied());
@@ -89,7 +105,7 @@ fn redact_json_strings(value: &mut serde_json::Value, sensitive_values: &[&str])
         serde_json::Value::Array(values) => {
             let mut changed = false;
             for value in values {
-                changed |= redact_json_strings(value, sensitive_values);
+                changed |= redact_json_values(value, sensitive_values, sensitive_scalars);
             }
             changed
         }
@@ -99,13 +115,23 @@ fn redact_json_strings(value: &mut serde_json::Value, sensitive_values: &[&str])
             for (key, mut value) in original {
                 let redacted_key = mask_all(&key, sensitive_values.iter().copied());
                 changed |= redacted_key != key;
-                changed |= redact_json_strings(&mut value, sensitive_values);
+                changed |= redact_json_values(&mut value, sensitive_values, sensitive_scalars);
                 insert_json_object_entry(values, redacted_key, value);
             }
             changed
         }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            false
+        scalar @ (serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)) => {
+            if sensitive_scalars
+                .iter()
+                .any(|sensitive| sensitive == &*scalar)
+            {
+                *scalar = serde_json::Value::String(REDACTED.to_string());
+                true
+            } else {
+                false
+            }
         }
     }
 }
@@ -194,7 +220,6 @@ fn truncate_redfish_error_message(mut message: String) -> String {
 
 /// Masks the union of all sensitive-value matches, including overlapping ones.
 fn mask_all<'a>(text: &str, sensitive_values: impl IntoIterator<Item = &'a str>) -> String {
-    const REDACTED: &str = "REDACTED";
     let mut ranges: Vec<(usize, usize)> = sensitive_values
         .into_iter()
         .filter(|value| !value.is_empty())
@@ -363,6 +388,33 @@ mod tests {
         assert_eq!(
             redacted["error"]["@Message.ExtendedInfo"][0]["REDACTED_2"],
             "second key"
+        );
+    }
+
+    #[test]
+    fn redfish_response_body_redaction_masks_matching_non_string_json_scalars() {
+        check_values(
+            [
+                Check {
+                    scenario: "numeric secret",
+                    input: (r#"{"credential":1234}"#, "1234"),
+                    expect: serde_json::json!({"credential": REDACTED}),
+                },
+                Check {
+                    scenario: "boolean-like secret",
+                    input: (r#"{"credential":true}"#, "true"),
+                    expect: serde_json::json!({"credential": REDACTED}),
+                },
+                Check {
+                    scenario: "null-like secret",
+                    input: (r#"{"credential":null}"#, "null"),
+                    expect: serde_json::json!({"credential": REDACTED}),
+                },
+            ],
+            |(response, sensitive_value)| {
+                let redacted = redact_redfish_response_body(response, [sensitive_value]);
+                serde_json::from_str(&redacted).expect("redacted response remains valid JSON")
+            },
         );
     }
 
