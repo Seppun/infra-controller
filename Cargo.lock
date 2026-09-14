@@ -2450,6 +2450,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ipmi",
  "carbide-network",
+ "carbide-rms-mock",
  "carbide-rpc",
  "carbide-test-support",
  "carbide-tls",
@@ -2907,7 +2908,6 @@ dependencies = [
  "config-version",
  "duration-str",
  "eyre",
- "librms",
  "mac_address",
  "opentelemetry 0.32.0",
  "reqwest 0.13.4",
@@ -2950,6 +2950,19 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "carbide-rms-mock"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "librms",
+ "mac_address",
+ "serde",
+ "tokio",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]
@@ -3293,6 +3306,7 @@ dependencies = [
  "serde",
  "size",
  "strip-ansi-escapes",
+ "surge-ping",
  "temp-dir",
  "thiserror 2.0.18",
  "tokio",

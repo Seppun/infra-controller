@@ -1261,6 +1261,7 @@ where
         hw_mac_address_ranges: None,
         mac_address_pool: None,
         ufm_mock: Default::default(),
+        rms_mock: Default::default(),
         generate_console_logs: false,
     };
 
