@@ -34,10 +34,13 @@ const (
 	Forge_FindDomainLegacy_FullMethodName                                   = "/forge.Forge/FindDomainLegacy"
 	Forge_CreateVpc_FullMethodName                                          = "/forge.Forge/CreateVpc"
 	Forge_UpdateVpc_FullMethodName                                          = "/forge.Forge/UpdateVpc"
+	Forge_ChangeVpcRoutingProfile_FullMethodName                            = "/forge.Forge/ChangeVpcRoutingProfile"
+	Forge_ReleaseVpcInactiveVni_FullMethodName                              = "/forge.Forge/ReleaseVpcInactiveVni"
 	Forge_UpdateVpcVirtualization_FullMethodName                            = "/forge.Forge/UpdateVpcVirtualization"
 	Forge_DeleteVpc_FullMethodName                                          = "/forge.Forge/DeleteVpc"
 	Forge_FindVpcIds_FullMethodName                                         = "/forge.Forge/FindVpcIds"
 	Forge_FindVpcsByIds_FullMethodName                                      = "/forge.Forge/FindVpcsByIds"
+	Forge_GetVpcRoutingState_FullMethodName                                 = "/forge.Forge/GetVpcRoutingState"
 	Forge_CreateSpxPartition_FullMethodName                                 = "/forge.Forge/CreateSpxPartition"
 	Forge_DeleteSpxPartition_FullMethodName                                 = "/forge.Forge/DeleteSpxPartition"
 	Forge_FindSpxPartitionIds_FullMethodName                                = "/forge.Forge/FindSpxPartitionIds"
@@ -85,6 +88,7 @@ const (
 	Forge_AllocateInstance_FullMethodName                                   = "/forge.Forge/AllocateInstance"
 	Forge_AllocateInstances_FullMethodName                                  = "/forge.Forge/AllocateInstances"
 	Forge_ReleaseInstance_FullMethodName                                    = "/forge.Forge/ReleaseInstance"
+	Forge_ReleaseInstances_FullMethodName                                   = "/forge.Forge/ReleaseInstances"
 	Forge_UpdateInstanceOperatingSystem_FullMethodName                      = "/forge.Forge/UpdateInstanceOperatingSystem"
 	Forge_UpdateInstanceConfig_FullMethodName                               = "/forge.Forge/UpdateInstanceConfig"
 	Forge_FindInstanceIds_FullMethodName                                    = "/forge.Forge/FindInstanceIds"
@@ -539,10 +543,21 @@ type ForgeClient interface {
 	// VPC
 	CreateVpc(ctx context.Context, in *VpcCreationRequest, opts ...grpc.CallOption) (*Vpc, error)
 	UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts ...grpc.CallOption) (*VpcUpdateResult, error)
+	// Changes an FNN VPC's named profile and active VNI while retaining the old
+	// allocation. Success means Core committed, not that the dataplane converged.
+	ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
+	// Operator cleanup after independently verifying that no DPU or fabric route
+	// still uses the retained VNI. Core does not verify dataplane convergence.
+	ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error)
+	// Deletion does not release a retained VNI implicitly. Call
+	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+	// Retained or inconsistent owned allocations cause FailedPrecondition.
 	DeleteVpc(ctx context.Context, in *VpcDeletionRequest, opts ...grpc.CallOption) (*VpcDeletionResult, error)
 	FindVpcIds(ctx context.Context, in *VpcSearchFilter, opts ...grpc.CallOption) (*VpcIdList, error)
 	FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, opts ...grpc.CallOption) (*VpcList, error)
+	// Reads persisted VPC routing and allocation state without changing it.
+	GetVpcRoutingState(ctx context.Context, in *VpcRoutingStateRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
 	CreateSpxPartition(ctx context.Context, in *SpxPartitionCreationRequest, opts ...grpc.CallOption) (*SpxPartition, error)
 	DeleteSpxPartition(ctx context.Context, in *SpxPartitionDeletionRequest, opts ...grpc.CallOption) (*SpxPartitionDeletionResult, error)
 	FindSpxPartitionIds(ctx context.Context, in *SpxPartitionSearchFilter, opts ...grpc.CallOption) (*SpxPartitionIdList, error)
@@ -616,6 +631,13 @@ type ForgeClient interface {
 	AllocateInstances(ctx context.Context, in *BatchInstanceAllocationRequest, opts ...grpc.CallOption) (*BatchInstanceAllocationResponse, error)
 	// Releases an instance that has been allocated by a tenant
 	ReleaseInstance(ctx context.Context, in *InstanceReleaseRequest, opts ...grpc.CallOption) (*InstanceReleaseResult, error)
+	// Releases multiple instances in a single call. Best-effort per instance --
+	// one instance failing to release (e.g. already released, or blocked by a
+	// health check) does not roll back or block the release of the rest of the
+	// batch. Compare AllocateInstances, which is all-or-nothing: that semantic
+	// does not fit release, where callers need partial progress rather than a
+	// single bad ID aborting an entire large batch.
+	ReleaseInstances(ctx context.Context, in *BatchInstanceReleaseRequest, opts ...grpc.CallOption) (*BatchInstanceReleaseResponse, error)
 	// Updates the network interface configuration for an instance
 	// The update will take effect asynchronously. Users should monitor `Instance.status.network_status.synced`
 	// to determine whether all updates have been applied.
@@ -979,9 +1001,7 @@ type ForgeClient interface {
 	DeleteAllExpectedRacks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(ctx context.Context, in *AttestQuoteRequest, opts ...grpc.CallOption) (*AttestQuoteResponse, error)
-	//
 	// InstanceType
-	//
 	CreateInstanceType(ctx context.Context, in *CreateInstanceTypeRequest, opts ...grpc.CallOption) (*CreateInstanceTypeResponse, error)
 	FindInstanceTypeIds(ctx context.Context, in *FindInstanceTypeIdsRequest, opts ...grpc.CallOption) (*FindInstanceTypeIdsResponse, error)
 	FindInstanceTypesByIds(ctx context.Context, in *FindInstanceTypesByIdsRequest, opts ...grpc.CallOption) (*FindInstanceTypesByIdsResponse, error)
@@ -1038,9 +1058,7 @@ type ForgeClient interface {
 	ListMeasurementTrustedMachines(ctx context.Context, in *ListMeasurementTrustedMachinesRequest, opts ...grpc.CallOption) (*ListMeasurementTrustedMachinesResponse, error)
 	ListMeasurementTrustedProfiles(ctx context.Context, in *ListMeasurementTrustedProfilesRequest, opts ...grpc.CallOption) (*ListMeasurementTrustedProfilesResponse, error)
 	ListAttestationSummary(ctx context.Context, in *ListAttestationSummaryRequest, opts ...grpc.CallOption) (*ListAttestationSummaryResponse, error)
-	//
 	// NetworkSecurityGroups
-	//
 	CreateNetworkSecurityGroup(ctx context.Context, in *CreateNetworkSecurityGroupRequest, opts ...grpc.CallOption) (*CreateNetworkSecurityGroupResponse, error)
 	FindNetworkSecurityGroupIds(ctx context.Context, in *FindNetworkSecurityGroupIdsRequest, opts ...grpc.CallOption) (*FindNetworkSecurityGroupIdsResponse, error)
 	FindNetworkSecurityGroupsByIds(ctx context.Context, in *FindNetworkSecurityGroupsByIdsRequest, opts ...grpc.CallOption) (*FindNetworkSecurityGroupsByIdsResponse, error)
@@ -1137,7 +1155,7 @@ type ForgeClient interface {
 	// Terminate active rack maintenance and transition the rack to Error.
 	TerminateRackMaintenance(ctx context.Context, in *RackMaintenanceTerminateRequest, opts ...grpc.CallOption) (*RackMaintenanceTerminateResponse, error)
 	// TPM CA certs Management
-	//rpc TpmDeleteCaCert(TpmCaCertDetails) returns (google.protobuf.Empty);
+	// rpc TpmDeleteCaCert(TpmCaCertDetails) returns (google.protobuf.Empty);
 	TpmAddCaCert(ctx context.Context, in *TpmCaCert, opts ...grpc.CallOption) (*TpmCaAddedCaStatus, error)
 	TpmShowCaCerts(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*TpmCaCertDetailCollection, error)
 	TpmShowUnmatchedEkCerts(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*TpmEkCertStatusCollection, error)
@@ -1200,9 +1218,7 @@ type ForgeClient interface {
 	// Lists the rack profiles from the effective runtime configuration.
 	// Rack profiles are configuration, not persisted rack resources.
 	ListRackProfiles(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListRackProfilesResponse, error)
-	//
 	// Compute Allocations
-	//
 	CreateComputeAllocation(ctx context.Context, in *CreateComputeAllocationRequest, opts ...grpc.CallOption) (*CreateComputeAllocationResponse, error)
 	FindComputeAllocationIds(ctx context.Context, in *FindComputeAllocationIdsRequest, opts ...grpc.CallOption) (*FindComputeAllocationIdsResponse, error)
 	FindComputeAllocationsByIds(ctx context.Context, in *FindComputeAllocationsByIdsRequest, opts ...grpc.CallOption) (*FindComputeAllocationsByIdsResponse, error)
@@ -1370,7 +1386,8 @@ type ForgeClient interface {
 	// Helm/docker versions for the nico DPF mandatory services, from both
 	// the nico config and the live DPUServiceTemplate CRs.
 	GetDPFServiceVersions(ctx context.Context, in *GetDPFServiceVersionsRequest, opts ...grpc.CallOption) (*DPFServiceVersionsResponse, error)
-	// Machines DPF is waiting on before a changed DPUService can roll out.
+	// Predicted or stable host machines DPF is waiting on before a changed
+	// DPUService can roll out.
 	//
 	// Required rather than convenient: the release RPC has no fleet-wide form, so
 	// this is the only way to discover which machines to name. Split ids-then-
@@ -1535,6 +1552,26 @@ func (c *forgeClient) UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts 
 	return out, nil
 }
 
+func (c *forgeClient) ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcRoutingState)
+	err := c.cc.Invoke(ctx, Forge_ChangeVpcRoutingProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcReleaseInactiveVniResult)
+	err := c.cc.Invoke(ctx, Forge_ReleaseVpcInactiveVni_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VpcUpdateVirtualizationResult)
@@ -1569,6 +1606,16 @@ func (c *forgeClient) FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, o
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VpcList)
 	err := c.cc.Invoke(ctx, Forge_FindVpcsByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetVpcRoutingState(ctx context.Context, in *VpcRoutingStateRequest, opts ...grpc.CallOption) (*VpcRoutingState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcRoutingState)
+	err := c.cc.Invoke(ctx, Forge_GetVpcRoutingState_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2039,6 +2086,16 @@ func (c *forgeClient) ReleaseInstance(ctx context.Context, in *InstanceReleaseRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InstanceReleaseResult)
 	err := c.cc.Invoke(ctx, Forge_ReleaseInstance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReleaseInstances(ctx context.Context, in *BatchInstanceReleaseRequest, opts ...grpc.CallOption) (*BatchInstanceReleaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BatchInstanceReleaseResponse)
+	err := c.cc.Invoke(ctx, Forge_ReleaseInstances_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6355,10 +6412,21 @@ type ForgeServer interface {
 	// VPC
 	CreateVpc(context.Context, *VpcCreationRequest) (*Vpc, error)
 	UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error)
+	// Changes an FNN VPC's named profile and active VNI while retaining the old
+	// allocation. Success means Core committed, not that the dataplane converged.
+	ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error)
+	// Operator cleanup after independently verifying that no DPU or fabric route
+	// still uses the retained VNI. Core does not verify dataplane convergence.
+	ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error)
+	// Deletion does not release a retained VNI implicitly. Call
+	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+	// Retained or inconsistent owned allocations cause FailedPrecondition.
 	DeleteVpc(context.Context, *VpcDeletionRequest) (*VpcDeletionResult, error)
 	FindVpcIds(context.Context, *VpcSearchFilter) (*VpcIdList, error)
 	FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error)
+	// Reads persisted VPC routing and allocation state without changing it.
+	GetVpcRoutingState(context.Context, *VpcRoutingStateRequest) (*VpcRoutingState, error)
 	CreateSpxPartition(context.Context, *SpxPartitionCreationRequest) (*SpxPartition, error)
 	DeleteSpxPartition(context.Context, *SpxPartitionDeletionRequest) (*SpxPartitionDeletionResult, error)
 	FindSpxPartitionIds(context.Context, *SpxPartitionSearchFilter) (*SpxPartitionIdList, error)
@@ -6432,6 +6500,13 @@ type ForgeServer interface {
 	AllocateInstances(context.Context, *BatchInstanceAllocationRequest) (*BatchInstanceAllocationResponse, error)
 	// Releases an instance that has been allocated by a tenant
 	ReleaseInstance(context.Context, *InstanceReleaseRequest) (*InstanceReleaseResult, error)
+	// Releases multiple instances in a single call. Best-effort per instance --
+	// one instance failing to release (e.g. already released, or blocked by a
+	// health check) does not roll back or block the release of the rest of the
+	// batch. Compare AllocateInstances, which is all-or-nothing: that semantic
+	// does not fit release, where callers need partial progress rather than a
+	// single bad ID aborting an entire large batch.
+	ReleaseInstances(context.Context, *BatchInstanceReleaseRequest) (*BatchInstanceReleaseResponse, error)
 	// Updates the network interface configuration for an instance
 	// The update will take effect asynchronously. Users should monitor `Instance.status.network_status.synced`
 	// to determine whether all updates have been applied.
@@ -6795,9 +6870,7 @@ type ForgeServer interface {
 	DeleteAllExpectedRacks(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(context.Context, *AttestQuoteRequest) (*AttestQuoteResponse, error)
-	//
 	// InstanceType
-	//
 	CreateInstanceType(context.Context, *CreateInstanceTypeRequest) (*CreateInstanceTypeResponse, error)
 	FindInstanceTypeIds(context.Context, *FindInstanceTypeIdsRequest) (*FindInstanceTypeIdsResponse, error)
 	FindInstanceTypesByIds(context.Context, *FindInstanceTypesByIdsRequest) (*FindInstanceTypesByIdsResponse, error)
@@ -6854,9 +6927,7 @@ type ForgeServer interface {
 	ListMeasurementTrustedMachines(context.Context, *ListMeasurementTrustedMachinesRequest) (*ListMeasurementTrustedMachinesResponse, error)
 	ListMeasurementTrustedProfiles(context.Context, *ListMeasurementTrustedProfilesRequest) (*ListMeasurementTrustedProfilesResponse, error)
 	ListAttestationSummary(context.Context, *ListAttestationSummaryRequest) (*ListAttestationSummaryResponse, error)
-	//
 	// NetworkSecurityGroups
-	//
 	CreateNetworkSecurityGroup(context.Context, *CreateNetworkSecurityGroupRequest) (*CreateNetworkSecurityGroupResponse, error)
 	FindNetworkSecurityGroupIds(context.Context, *FindNetworkSecurityGroupIdsRequest) (*FindNetworkSecurityGroupIdsResponse, error)
 	FindNetworkSecurityGroupsByIds(context.Context, *FindNetworkSecurityGroupsByIdsRequest) (*FindNetworkSecurityGroupsByIdsResponse, error)
@@ -6953,7 +7024,7 @@ type ForgeServer interface {
 	// Terminate active rack maintenance and transition the rack to Error.
 	TerminateRackMaintenance(context.Context, *RackMaintenanceTerminateRequest) (*RackMaintenanceTerminateResponse, error)
 	// TPM CA certs Management
-	//rpc TpmDeleteCaCert(TpmCaCertDetails) returns (google.protobuf.Empty);
+	// rpc TpmDeleteCaCert(TpmCaCertDetails) returns (google.protobuf.Empty);
 	TpmAddCaCert(context.Context, *TpmCaCert) (*TpmCaAddedCaStatus, error)
 	TpmShowCaCerts(context.Context, *emptypb.Empty) (*TpmCaCertDetailCollection, error)
 	TpmShowUnmatchedEkCerts(context.Context, *emptypb.Empty) (*TpmEkCertStatusCollection, error)
@@ -7016,9 +7087,7 @@ type ForgeServer interface {
 	// Lists the rack profiles from the effective runtime configuration.
 	// Rack profiles are configuration, not persisted rack resources.
 	ListRackProfiles(context.Context, *emptypb.Empty) (*ListRackProfilesResponse, error)
-	//
 	// Compute Allocations
-	//
 	CreateComputeAllocation(context.Context, *CreateComputeAllocationRequest) (*CreateComputeAllocationResponse, error)
 	FindComputeAllocationIds(context.Context, *FindComputeAllocationIdsRequest) (*FindComputeAllocationIdsResponse, error)
 	FindComputeAllocationsByIds(context.Context, *FindComputeAllocationsByIdsRequest) (*FindComputeAllocationsByIdsResponse, error)
@@ -7186,7 +7255,8 @@ type ForgeServer interface {
 	// Helm/docker versions for the nico DPF mandatory services, from both
 	// the nico config and the live DPUServiceTemplate CRs.
 	GetDPFServiceVersions(context.Context, *GetDPFServiceVersionsRequest) (*DPFServiceVersionsResponse, error)
-	// Machines DPF is waiting on before a changed DPUService can roll out.
+	// Predicted or stable host machines DPF is waiting on before a changed
+	// DPUService can roll out.
 	//
 	// Required rather than convenient: the release RPC has no fleet-wide form, so
 	// this is the only way to discover which machines to name. Split ids-then-
@@ -7269,6 +7339,12 @@ func (UnimplementedForgeServer) CreateVpc(context.Context, *VpcCreationRequest) 
 func (UnimplementedForgeServer) UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpc not implemented")
 }
+func (UnimplementedForgeServer) ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error) {
+	return nil, status.Error(codes.Unimplemented, "method ChangeVpcRoutingProfile not implemented")
+}
+func (UnimplementedForgeServer) ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseVpcInactiveVni not implemented")
+}
 func (UnimplementedForgeServer) UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpcVirtualization not implemented")
 }
@@ -7280,6 +7356,9 @@ func (UnimplementedForgeServer) FindVpcIds(context.Context, *VpcSearchFilter) (*
 }
 func (UnimplementedForgeServer) FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindVpcsByIds not implemented")
+}
+func (UnimplementedForgeServer) GetVpcRoutingState(context.Context, *VpcRoutingStateRequest) (*VpcRoutingState, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetVpcRoutingState not implemented")
 }
 func (UnimplementedForgeServer) CreateSpxPartition(context.Context, *SpxPartitionCreationRequest) (*SpxPartition, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateSpxPartition not implemented")
@@ -7421,6 +7500,9 @@ func (UnimplementedForgeServer) AllocateInstances(context.Context, *BatchInstanc
 }
 func (UnimplementedForgeServer) ReleaseInstance(context.Context, *InstanceReleaseRequest) (*InstanceReleaseResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReleaseInstance not implemented")
+}
+func (UnimplementedForgeServer) ReleaseInstances(context.Context, *BatchInstanceReleaseRequest) (*BatchInstanceReleaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseInstances not implemented")
 }
 func (UnimplementedForgeServer) UpdateInstanceOperatingSystem(context.Context, *InstanceOperatingSystemUpdateRequest) (*Instance, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateInstanceOperatingSystem not implemented")
@@ -8924,6 +9006,42 @@ func _Forge_UpdateVpc_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_ChangeVpcRoutingProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcChangeRoutingProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ChangeVpcRoutingProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ChangeVpcRoutingProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ChangeVpcRoutingProfile(ctx, req.(*VpcChangeRoutingProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReleaseVpcInactiveVni_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcReleaseInactiveVniRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReleaseVpcInactiveVni(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReleaseVpcInactiveVni_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReleaseVpcInactiveVni(ctx, req.(*VpcReleaseInactiveVniRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_UpdateVpcVirtualization_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(VpcUpdateVirtualizationRequest)
 	if err := dec(in); err != nil {
@@ -8992,6 +9110,24 @@ func _Forge_FindVpcsByIds_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).FindVpcsByIds(ctx, req.(*VpcsByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetVpcRoutingState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcRoutingStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetVpcRoutingState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetVpcRoutingState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetVpcRoutingState(ctx, req.(*VpcRoutingStateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -9838,6 +9974,24 @@ func _Forge_ReleaseInstance_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).ReleaseInstance(ctx, req.(*InstanceReleaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReleaseInstances_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchInstanceReleaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReleaseInstances(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReleaseInstances_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReleaseInstances(ctx, req.(*BatchInstanceReleaseRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -17587,6 +17741,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateVpc_Handler,
 		},
 		{
+			MethodName: "ChangeVpcRoutingProfile",
+			Handler:    _Forge_ChangeVpcRoutingProfile_Handler,
+		},
+		{
+			MethodName: "ReleaseVpcInactiveVni",
+			Handler:    _Forge_ReleaseVpcInactiveVni_Handler,
+		},
+		{
 			MethodName: "UpdateVpcVirtualization",
 			Handler:    _Forge_UpdateVpcVirtualization_Handler,
 		},
@@ -17601,6 +17763,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FindVpcsByIds",
 			Handler:    _Forge_FindVpcsByIds_Handler,
+		},
+		{
+			MethodName: "GetVpcRoutingState",
+			Handler:    _Forge_GetVpcRoutingState_Handler,
 		},
 		{
 			MethodName: "CreateSpxPartition",
@@ -17789,6 +17955,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReleaseInstance",
 			Handler:    _Forge_ReleaseInstance_Handler,
+		},
+		{
+			MethodName: "ReleaseInstances",
+			Handler:    _Forge_ReleaseInstances_Handler,
 		},
 		{
 			MethodName: "UpdateInstanceOperatingSystem",
