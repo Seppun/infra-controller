@@ -24,7 +24,7 @@ provisioning flows, and referencing them from a tenant script will not do anythi
 
 ## Typical Use
 
-Booting an OS installer against a cloud-init datasource:
+The following example boots an OS installer with a cloud-init data source:
 
 ```text
 #!ipxe
