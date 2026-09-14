@@ -1065,9 +1065,10 @@ duration strings such as `30s` and `60s` and defaults to `30s`. Use seconds for
 this request timeout, although the parser accepts other duration units such as
 milliseconds (`ms`), minutes (`m`), and hours (`h`). Without the block, NICo
 skips both automatic update phases. An explicit maintenance request can supply
-a firmware object instead. If no firmware object is available while a switch in
-the maintenance scope is already waiting for an NVOS update, the rack
-transitions to `Error` instead of skipping the NVOS phase.
+a firmware object instead. If no firmware object is available while a selected
+switch is in `WaitingForNVOSUpgrade` for a reprovision request whose initiator
+is `rack-{rack_id}`, the rack transitions to `Error` instead of skipping the
+NVOS phase.
 
 ---
 

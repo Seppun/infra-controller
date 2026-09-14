@@ -248,9 +248,10 @@ switches, the document must include an NVOS image whose firmware type matches
 omitted. RMS records an asynchronous update failure when the document does not
 contain the required image. If `firmware_object` is omitted, NICo skips both
 automatic update phases. An explicit maintenance request can supply a firmware
-object instead. If no firmware object is available while a switch in the
-maintenance scope is already waiting for an NVOS update, the rack transitions
-to `Error` instead of skipping the NVOS phase.
+object instead. If no firmware object is available while a selected switch is
+in `WaitingForNVOSUpgrade` for a reprovision request whose initiator is
+`rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
+phase.
 `fetch_timeout` defaults to `30s`.
 
 Example: GB300 rack with NVIDIA compute trays and Delta power shelves:
