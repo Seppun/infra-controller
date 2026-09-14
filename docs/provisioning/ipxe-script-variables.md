@@ -22,7 +22,7 @@ automatically; a script that hard-codes a hostname instead does not.
 `${dpu-cloudinit-url}` and `${scout-cloudinit-url}` are listed for completeness. They serve NICo's own
 provisioning flows, and referencing them from a tenant script will not do anything useful.
 
-## Typical use
+## Typical Use
 
 Booting an OS installer against a cloud-init datasource:
 
