@@ -44,10 +44,9 @@ document, and the boot continues.
 
 **Deprecated in favor of `${tenant-cloudinit-url}`. Update scripts that use it.**
 
-`${cloudinit-url}` was the single cloud-init URL from when one endpoint served every consumer. The
-cloud-init routes are now split by consumer — a tenant instance, a DPU being provisioned, and a host
-running the discovery OS each have their own prefix — so that the URL a machine boots with identifies
-what it is, rather than the service inferring it from data that cannot cleanly distinguish the three.
+`${cloudinit-url}` is the original single cloud-init URL. Each consumer now has a separate prefix:
+tenant instances, DPUs being provisioned, and hosts running the discovery OS. The prefix identifies
+the consumer without requiring the service to infer it from ambiguous data.
 
 `${cloudinit-url}` remains an alias for `${tenant-cloudinit-url}` and continues to work unchanged, so
 existing scripts keep booting. It will be removed in a future release. Scripts referencing it should
