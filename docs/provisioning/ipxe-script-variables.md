@@ -11,7 +11,7 @@ automatically; a script that hard-codes a hostname instead does not.
 
 ## Available variables
 
-| Variable | Value | Use it for |
+| Variable | Value | Use It For |
 |---|---|---|
 | `${base-url}` | The boot-artifact tree, `…/public/blobs/` | Chaining to a kernel, initrd, or EFI image NICo serves |
 | `${tenant-cloudinit-url}` | The NoCloud datasource for an assigned instance | `ds=nocloud-net;s=${tenant-cloudinit-url}` in an OS install script |
