@@ -18,6 +18,7 @@
 use std::net::IpAddr;
 
 use mac_address::MacAddress;
+use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 const REDFISH_ERROR_MESSAGE_LIMIT: usize = 1024;
 const REDACTED: &str = "REDACTED";
@@ -80,10 +81,130 @@ pub fn redact_redfish_response_body<'a>(
         })
         .collect::<Vec<_>>();
     if !redact_json_values(&mut response, &sensitive_values, &sensitive_scalars) {
-        return response_body.to_string();
+        match json_contains_sensitive_value(response_body, &sensitive_values, &sensitive_scalars) {
+            Ok(false) => return response_body.to_string(),
+            Ok(true) => {}
+            Err(_) => return UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string(),
+        }
     }
     serde_json::to_string(&response)
         .unwrap_or_else(|_| UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string())
+}
+
+/// Checks every JSON token before the original representation is returned.
+/// Unlike `serde_json::Value`, this visitor observes object entries that are
+/// later overwritten by duplicate keys.
+fn json_contains_sensitive_value(
+    response_body: &str,
+    sensitive_values: &[&str],
+    sensitive_scalars: &[serde_json::Value],
+) -> serde_json::Result<bool> {
+    let detector = SensitiveJsonDetector {
+        sensitive_values,
+        sensitive_scalars,
+    };
+    let mut deserializer = serde_json::Deserializer::from_str(response_body);
+    let contains_sensitive_value = detector.deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(contains_sensitive_value)
+}
+
+#[derive(Clone, Copy)]
+struct SensitiveJsonDetector<'a, 's> {
+    sensitive_values: &'s [&'a str],
+    sensitive_scalars: &'s [serde_json::Value],
+}
+
+impl SensitiveJsonDetector<'_, '_> {
+    fn string_is_sensitive(self, value: &str) -> bool {
+        mask_all(value, self.sensitive_values.iter().copied()) != value
+    }
+
+    fn scalar_is_sensitive(self, value: serde_json::Value) -> bool {
+        self.sensitive_scalars
+            .iter()
+            .any(|sensitive| sensitive == &value)
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for SensitiveJsonDetector<'_, '_> {
+    type Value = bool;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for SensitiveJsonDetector<'_, '_> {
+    type Value = bool;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(self.scalar_is_sensitive(serde_json::Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(self.scalar_is_sensitive(serde_json::Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(self.scalar_is_sensitive(serde_json::Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+        Ok(serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .is_some_and(|value| self.scalar_is_sensitive(value)))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(self.string_is_sensitive(value))
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E> {
+        Ok(self.string_is_sensitive(value))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(self.string_is_sensitive(&value))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(self.scalar_is_sensitive(serde_json::Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(self.scalar_is_sensitive(serde_json::Value::Null))
+    }
+
+    fn visit_seq<A>(self, mut values: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut contains_sensitive_value = false;
+        while let Some(value_is_sensitive) = values.next_element_seed(self)? {
+            contains_sensitive_value |= value_is_sensitive;
+        }
+        Ok(contains_sensitive_value)
+    }
+
+    fn visit_map<A>(self, mut values: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut contains_sensitive_value = false;
+        while let Some(key_is_sensitive) = values.next_key_seed(self)? {
+            contains_sensitive_value |= key_is_sensitive;
+            contains_sensitive_value |= values.next_value_seed(self)?;
+        }
+        Ok(contains_sensitive_value)
+    }
 }
 
 /// Redacts JSON values and object keys, returning whether anything changed.
@@ -415,6 +536,51 @@ mod tests {
                 let redacted = redact_redfish_response_body(response, [sensitive_value]);
                 serde_json::from_str(&redacted).expect("redacted response remains valid JSON")
             },
+        );
+    }
+
+    #[test]
+    fn redfish_response_body_redaction_sanitizes_overwritten_duplicate_values() {
+        check_values(
+            [
+                Check {
+                    scenario: "escaped string",
+                    input: (r#"{"detail":"s\u0065cret","detail":"safe"}"#, "secret"),
+                    expect: r#"{"detail":"safe"}"#.to_string(),
+                },
+                Check {
+                    scenario: "escaped string in a nested array",
+                    input: (
+                        r#"{"detail":{"messages":["s\u0065cret"]},"detail":"safe"}"#,
+                        "secret",
+                    ),
+                    expect: r#"{"detail":"safe"}"#.to_string(),
+                },
+                Check {
+                    scenario: "escaped object key",
+                    input: (
+                        r#"{"detail":{"credential-s\u0065cret":"rejected"},"detail":"safe"}"#,
+                        "secret",
+                    ),
+                    expect: r#"{"detail":"safe"}"#.to_string(),
+                },
+                Check {
+                    scenario: "number",
+                    input: (r#"{"detail":1234,"detail":"safe"}"#, "1234"),
+                    expect: r#"{"detail":"safe"}"#.to_string(),
+                },
+                Check {
+                    scenario: "boolean",
+                    input: (r#"{"detail":true,"detail":"safe"}"#, "true"),
+                    expect: r#"{"detail":"safe"}"#.to_string(),
+                },
+                Check {
+                    scenario: "null",
+                    input: (r#"{"detail":null,"detail":"safe"}"#, "null"),
+                    expect: r#"{"detail":"safe"}"#.to_string(),
+                },
+            ],
+            |(response, sensitive_value)| redact_redfish_response_body(response, [sensitive_value]),
         );
     }
 
