@@ -76,11 +76,39 @@ impl RedfishBmc {
         operation: &'static str,
         result: Result<T, BmcError>,
     ) -> Result<T, BmcError> {
-        let result = redact_bmc_error(result, &self.sensitive_values);
+        self.finish_with_sensitive_values(operation, result, &self.sensitive_values)
+    }
+
+    fn finish_with_sensitive_values<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, BmcError>,
+        sensitive_values: &[String],
+    ) -> Result<T, BmcError> {
+        let result = redact_bmc_error(result, sensitive_values);
         if let Err(error) = &result {
-            log_bmc_error(operation, error, &self.sensitive_values);
+            log_bmc_error(operation, error, sensitive_values);
         }
         result
+    }
+
+    /// Session creation can submit credentials that differ from the client's
+    /// authentication credential. Include every non-empty string in that small
+    /// request document when sanitizing the returned and logged HTTP error.
+    fn finish_session<T, V: Serialize>(
+        &self,
+        operation: &'static str,
+        query: &V,
+        result: Result<T, BmcError>,
+    ) -> Result<T, BmcError> {
+        let mut sensitive_values = self.sensitive_values.to_vec();
+        if let Ok(query) = serde_json::to_value(query) {
+            collect_nonempty_json_strings(&query, &mut sensitive_values);
+        }
+        sensitive_values.sort_unstable();
+        sensitive_values.dedup();
+
+        self.finish_with_sensitive_values(operation, result, &sensitive_values)
     }
 }
 
@@ -134,6 +162,26 @@ fn sensitive_values(credentials: &BmcCredentials) -> Arc<[String]> {
     }
 }
 
+fn collect_nonempty_json_strings(value: &serde_json::Value, strings: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => strings.push(value.clone()),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_nonempty_json_strings(value, strings);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_nonempty_json_strings(value, strings);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
 impl Bmc for RedfishBmc {
     type Error = BmcError;
 
@@ -181,7 +229,7 @@ impl Bmc for RedfishBmc {
         query: &V,
     ) -> Result<SessionCreateResponse<R>, Self::Error> {
         let result = self.inner.create_session(id, query).await;
-        self.finish("create_session", result)
+        self.finish_session("create_session", query, result)
     }
 
     async fn update<
@@ -773,10 +821,9 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn http_failure_logs_structured_context_and_masks_credentials() {
-        let credentials = BmcCredentials::new("root".to_string(), "secret".to_string());
-        let bmc = RedfishBmc::new(
+    fn test_bmc(credentials: BmcCredentials) -> RedfishBmc {
+        let sensitive_values = sensitive_values(&credentials);
+        RedfishBmc::new(
             InnerRedfishBmc::with_custom_headers(
                 SpanIsolatedHttpClient::new(
                     RedfishReqwestClient::with_params(
@@ -785,12 +832,18 @@ mod tests {
                     .expect("test HTTP client"),
                 ),
                 Url::parse("https://bmc.example").expect("valid test BMC URL"),
-                credentials.clone(),
+                credentials,
                 CacheSettings::with_capacity(1),
                 HeaderMap::new(),
             ),
-            sensitive_values(&credentials),
-        );
+            sensitive_values,
+        )
+    }
+
+    #[test]
+    fn http_failure_logs_structured_context_and_masks_credentials() {
+        let credentials = BmcCredentials::new("root".to_string(), "secret".to_string());
+        let bmc = test_bmc(credentials);
         let error = BmcError::InvalidResponse {
             url: Url::parse("https://bmc.example/redfish/v1/Systems/1").expect("valid test URL"),
             status: http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -837,6 +890,50 @@ mod tests {
         assert_eq!(
             response["error"]["@Message.ExtendedInfo"][0]["Message"],
             "credential REDACTED rejected"
+        );
+    }
+
+    #[test]
+    fn session_failure_redacts_client_and_payload_credentials_before_logging_and_returning() {
+        let bmc = test_bmc(BmcCredentials::Token {
+            token: "client-token".to_string(),
+        });
+        let query = serde_json::json!({
+            "UserName": "session-user",
+            "Password": "session-secret",
+        });
+        let error = BmcError::InvalidResponse {
+            url: Url::parse("https://bmc.example/redfish/v1/SessionService/Sessions")
+                .expect("valid test URL"),
+            status: http::StatusCode::UNAUTHORIZED,
+            text: r#"{"error":{"message":"client-token rejected s\u0065ssion-secret for session-user"}}"#
+                .to_string(),
+        };
+
+        let mut result: Option<Result<(), BmcError>> = None;
+        let logs = capture_logs(|| {
+            result = Some(bmc.finish_session("create_session", &query, Err(error)));
+        });
+        let error = result
+            .expect("captured result")
+            .expect_err("HTTP failure remains an error");
+
+        let log = logs.first().expect("one nv-redfish failure log");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(log.field("operation"), Some("create_session"));
+        assert_eq!(
+            log.field("error"),
+            Some("REDACTED rejected REDACTED for REDACTED")
+        );
+
+        let BmcError::InvalidResponse { text, .. } = error else {
+            panic!("HTTP error remains an HTTP error after redaction");
+        };
+        let response: serde_json::Value =
+            serde_json::from_str(&text).expect("redacted body remains valid JSON");
+        assert_eq!(
+            response["error"]["message"],
+            "REDACTED rejected REDACTED for REDACTED"
         );
     }
 
