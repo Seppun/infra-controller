@@ -9,7 +9,7 @@ The variables are set by the PXE service, so they always carry the URLs that par
 reach. A machine on a segment that reaches NICo under a different name gets that name substituted
 automatically; a script that hard-codes a hostname instead does not.
 
-## Available variables
+## Available Variables
 
 | Variable | Value | Use It For |
 |---|---|---|
