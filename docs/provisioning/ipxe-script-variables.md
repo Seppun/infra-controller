@@ -1,8 +1,8 @@
 # iPXE Script Variables
 
 When a machine network-boots, NICo's PXE service serves it an iPXE script. That script sets a small
-number of variables before running the boot instructions, so anything those instructions reference —
-including a custom `ipxeScript` supplied through the REST API or an operating-system definition — can
+number of variables before running the boot instructions, so anything those instructions reference—
+including a custom `ipxeScript` supplied through the REST API or an operating-system definition—can
 use them instead of hard-coding a site's URLs.
 
 The variables are set by the PXE service, so they always carry the URLs that particular machine can
