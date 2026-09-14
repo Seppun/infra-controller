@@ -15,7 +15,9 @@ import (
 	zlogadapter "logur.dev/adapter/zerolog"
 	"logur.dev/logur"
 
+	"go.opentelemetry.io/otel"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
@@ -71,6 +73,15 @@ func workflowOrchestrator() error {
 	var clientInterceptors []interceptor.ClientInterceptor
 	var workerInterceptors []interceptor.WorkerInterceptor
 
+	// otelErr, not err: `var err error` is declared further down.
+	otelInterceptor, otelErr := opentelemetry.NewTracingInterceptor(
+		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
+	if otelErr != nil {
+		return fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
+	}
+	clientInterceptors = append(clientInterceptors, otelInterceptor)
+	workerInterceptors = append(workerInterceptors, otelInterceptor)
+
 	// Create logger for temporal using
 	// zero logger
 	// This is optional
@@ -100,6 +111,18 @@ func workflowOrchestrator() error {
 		if err != nil {
 			log.Error().Msg("Workflow: Unable to read client certificates")
 			return err
+		}
+
+		// Each pod loads its own certificate on startup and reload.
+		leaf := clientcert.Leaf
+		if leaf == nil {
+			// GODEBUG=x509keypairleaf=0 leaves Leaf unset after a successful load.
+			leaf, err = x509.ParseCertificate(clientcert.Certificate[0])
+		}
+		if err == nil && leaf != nil && CertExpirationMetric != nil {
+			CertExpirationMetric.Set(float64(leaf.NotAfter.Unix()))
+		} else {
+			log.Warn().Err(err).Msg("Workflow: Unable to update Temporal certificate expiration metric")
 		}
 
 		// Load server cert

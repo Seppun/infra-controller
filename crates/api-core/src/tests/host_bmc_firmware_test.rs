@@ -22,6 +22,7 @@ use std::time::Duration;
 use carbide_firmware::test_support::script_setup;
 use carbide_machine_controller::config::{FirmwareGlobal, TimePeriod};
 use carbide_machine_controller::handler::MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES;
+use carbide_uuid::machine::StableHostMachineId;
 use common::api_fixtures::instance::TestInstance;
 use common::api_fixtures::{
     self, TestEnv, TestManagedHost, create_test_env_with_overrides, get_config,
@@ -1896,7 +1897,7 @@ async fn test_manual_firmware_upgrade_workflow(pool: sqlx::PgPool) -> CarbideRes
 /// Helper: set `host` to WaitingForScoutUpgrade with the given deadline and result.
 async fn put_in_waiting_for_scout_upgrade(
     env: &common::api_fixtures::TestEnv,
-    host: &common::api_fixtures::test_machine::TestMachine,
+    host: &common::api_fixtures::test_machine::TestMachine<StableHostMachineId>,
     deadline: chrono::DateTime<chrono::Utc>,
     power_drains_needed: Option<u32>,
     result: Option<model::machine::ScoutUpgradeResult>,

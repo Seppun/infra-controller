@@ -30,10 +30,10 @@ use carbide_dpf::{
     DpuDeviceInfo, DpuNodeInfo, DpuPhase, DpuWatcher, KubeRepository, ResourceLabeler,
     node_id_from_dpu_node_cr_name,
 };
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::dpa_interface::DpaInterface;
 use model::dpu_machine_update::OutdatedDpfDpu;
-use model::machine::{Machine, ManagedHostStateSnapshot};
+use model::machine::{DpuMachine, ManagedHostStateSnapshot};
 use model::machine_pending_action::{MachinePendingAction, MachinePendingActionKind};
 use sqlx::PgPool;
 use state_controller::controller::Enqueuer;
@@ -123,7 +123,7 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
     /// profile. This returns `Err` when the DMI product name is absent.
     fn deployment_type_for_dpu(
         &self,
-        dpu: &Machine,
+        dpu: &DpuMachine,
         astra_nics: bool,
     ) -> Result<DpuDeploymentType, DpfError>;
 
@@ -528,7 +528,7 @@ impl DpfSdkOps {
 /// Records that a host owes `kind`, returning the stored action.
 async fn record_pending_action(
     db_pool: &PgPool,
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     kind: MachinePendingActionKind,
 ) -> Result<MachinePendingAction, DpfError> {
     let mut conn = db_pool.acquire().await.map_err(|e| {
@@ -567,7 +567,7 @@ async fn enqueue_host(
         let mut conn = db_pool.acquire().await.map_err(|e| {
             DpfError::InvalidState(format!("Failed to acquire database connection: {e}"))
         })?;
-        db::machine_topology::find_machine_id_by_bmc_mac(&mut conn, bmc_mac)
+        db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(&mut conn, bmc_mac)
             .await
             .map_err(|e| {
                 DpfError::InvalidState(format!("DB error looking up host by BMC MAC: {e}"))
@@ -713,7 +713,7 @@ impl DpfOperations for DpfSdkOps {
 
     fn deployment_type_for_dpu(
         &self,
-        dpu: &Machine,
+        dpu: &DpuMachine,
         astra_nics: bool,
     ) -> Result<DpuDeploymentType, DpfError> {
         let product_name = dpu
@@ -816,7 +816,7 @@ impl DpfOperations for DpfSdkOps {
                 );
                 continue;
             };
-            let dpu_machine_id: MachineId = match machine_id_str.parse() {
+            let dpu_machine_id: DpuMachineId = match machine_id_str.parse() {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::warn!(

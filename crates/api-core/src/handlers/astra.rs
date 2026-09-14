@@ -18,7 +18,7 @@
 use std::str::FromStr;
 
 use ::rpc::forge::{AstraAttachment, AstraConfig, AstraConfigStatus, AstraPhase};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
 use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
@@ -156,7 +156,7 @@ pub(super) async fn get_astra_config(
 
             // Now we can create the Astra attachment and add it to the Astra config.
             let astra_attachment = AstraAttachment {
-                mac_address: dpa_interface.mac_address.to_string(),
+                mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
                 vni: dpa_vni as u32,
                 subnet_ipv4: subnet_ip.to_string(),
                 subnet_mask,
@@ -169,7 +169,7 @@ pub(super) async fn get_astra_config(
             astra_attachments.push(astra_attachment);
         } else {
             let astra_attachment = AstraAttachment {
-                mac_address: dpa_interface.mac_address.to_string(),
+                mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
                 vni: 0,
                 subnet_ipv4: subnet_ip.to_string(),
                 subnet_mask,
@@ -197,7 +197,7 @@ pub(super) async fn get_astra_config(
 /// 2) Does the host associated with the DPU have any Astra NICs? If not, just return
 pub(super) async fn process_astra_config_status(
     api: &Api,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
     astra_config_status: &AstraConfigStatus,
 ) -> Result<(), Status> {
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_astra_enabled() {

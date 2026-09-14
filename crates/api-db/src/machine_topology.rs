@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
 use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
 use model::bmc_info::BmcInfo;
@@ -58,12 +58,13 @@ pub async fn create_or_update(
     machine_id: &MachineId,
     hardware_info: &HardwareInfo,
 ) -> DatabaseResult<MachineTopology> {
-    let topology_data = find_latest_by_machine_ids(txn, &[*machine_id]).await?;
-    let topology_data = topology_data.get(machine_id);
+    let machine_id = machine_id.to_machine_id();
+    let topology_data = find_latest_by_machine_ids(txn, &[machine_id]).await?;
+    let topology_data = topology_data.get(&machine_id);
 
     if let Some(topology) = topology_data {
         if topology.topology_update_needed {
-            return update(txn, machine_id, hardware_info).await;
+            return update(txn, &machine_id, hardware_info).await;
         }
         return Ok(topology.clone());
     }
@@ -188,10 +189,11 @@ pub async fn lock_by_machine_id(
     Ok(())
 }
 
-pub async fn find_by_machine_ids(
+// TODO: should this be HostMachineId-only instead of an arbitrary machine type?
+pub async fn find_by_machine_ids<ID: MachineIdSubtypeTrait>(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> Result<HashMap<MachineId, Vec<MachineTopology>>, DatabaseError> {
+    machine_ids: &[ID],
+) -> Result<HashMap<ID, Vec<MachineTopology>>, DatabaseError> {
     // TODO: Actually this shouldn't be able to return multiple entries,
     // since there is a check in create that for existing interfaces
     // But due to race conditions we can likely still have multiple of those interfaces
@@ -203,14 +205,15 @@ pub async fn find_by_machine_ids(
         .await
         .map_err(|e| DatabaseError::query(query, e))?
         .into_iter()
-        .into_group_map_by(|t: &MachineTopology| t.machine_id);
+        .filter_map(|t: MachineTopology| Some((ID::try_from(t.machine_id).ok()?, t)))
+        .into_group_map();
     Ok(topologies)
 }
 
-pub async fn find_latest_by_machine_ids(
+pub async fn find_latest_by_machine_ids<ID: MachineIdSubtypeTrait>(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> Result<HashMap<MachineId, MachineTopology>, DatabaseError> {
+    machine_ids: &[ID],
+) -> Result<HashMap<ID, MachineTopology>, DatabaseError> {
     // TODO: So far this just moved code around
     // This way of doing fetching the latest topology is inefficient, because it will still fetch all
     // information. We can change the query - however if we store information
@@ -250,10 +253,14 @@ pub async fn find_machine_id_by_bmc_ip(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-pub async fn find_machine_id_by_bmc_mac(
+pub async fn find_machine_id_by_bmc_mac<ID>(
     txn: &mut PgConnection,
     mac_address: mac_address::MacAddress,
-) -> Result<Option<MachineId>, DatabaseError> {
+) -> Result<Option<ID>, DatabaseError>
+where
+    ID: MachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
     let query = r#"
         SELECT machine_id
         FROM machine_interfaces
@@ -261,11 +268,13 @@ pub async fn find_machine_id_by_bmc_mac(
             AND machine_id IS NOT NULL
             AND mac_address = $1::macaddr
     "#;
-    sqlx::query_as(query)
+    let machine_id: Option<MachineId> = sqlx::query_as(query)
         .bind(mac_address)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(machine_id.map(ID::try_from).transpose()?)
 }
 
 pub async fn find_machine_bmc_pairs(
@@ -294,10 +303,15 @@ pub async fn find_machine_bmc_pairs(
 /// The BMC IP is returned as `Option<String>`:
 /// - `Some(ip)` if the topology has a valid BMC IP
 /// - `None` if the linked interface exists but has no BMC IP (caller can log/handle this case)
-pub async fn find_machine_bmc_pairs_by_machine_id(
+pub async fn find_machine_bmc_pairs_by_machine_id<ID>(
     txn: &mut PgConnection,
-    machine_ids: Vec<MachineId>,
-) -> Result<Vec<(MachineId, Option<String>)>, DatabaseError> {
+    machine_ids: Vec<ID>,
+) -> Result<Vec<(ID, Option<String>)>, DatabaseError>
+where
+    ID: MachineIdSubtypeTrait,
+    ID: TryFrom<MachineId>,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
     let query = r#"
         SELECT DISTINCT ON (mi.machine_id) mi.machine_id, host(mia.address)
         FROM machine_interfaces mi
@@ -306,13 +320,25 @@ pub async fn find_machine_bmc_pairs_by_machine_id(
             AND mi.machine_id = ANY($1)
         ORDER BY mi.machine_id, family(mia.address), mia.address
     "#;
-    sqlx::query_as(query)
-        .bind(machine_ids)
+    let results: Vec<(MachineId, Option<String>)> = sqlx::query_as(query)
+        .bind(
+            machine_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+        )
         .fetch_all(txn)
         .await
         .map_err(|e| {
             DatabaseError::new("machine_topologies find_machine_bmc_pairs_by_machine_id", e)
+        })?;
+
+    Ok(results
+        .into_iter()
+        .map(|(machine_id, host)| {
+            Ok::<_, <ID as TryFrom<MachineId>>::Error>((ID::try_from(machine_id)?, host))
         })
+        .collect::<Result<Vec<_>, <ID as TryFrom<MachineId>>::Error>>()?)
 }
 
 /// Find any topology with a product, chassis, or board serial number exactly matching the input.

@@ -22,7 +22,7 @@ List available component firmware versions
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -43,6 +43,7 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli component-manager get-firmware-versions switch --switch-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli component-manager get-firmware-versions compute-tray --mac-address 00:11:22:33:44:55
 nico-admin-cli component-manager get-firmware-versions power-shelf --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli component-manager get-firmware-versions rack --rack-id 12345678-1234-5678-90ab-cdef01234567
 ```

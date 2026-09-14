@@ -22,7 +22,7 @@ Get component firmware update status
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -44,6 +44,7 @@ Print help (see a summary with -h)
 ```sh
 nico-admin-cli component-manager get-firmware-update-status switch --switch-id 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli component-manager get-firmware-update-status compute-tray --machine-id 12345678-1234-5678-90ab-cdef01234567,abcdef01-2345-6789-abcd-ef0123456789
+nico-admin-cli component-manager get-firmware-update-status compute-tray --mac-address 00:11:22:33:44:55
 nico-admin-cli component-manager get-firmware-update-status rack --rack-id 12345678-1234-5678-90ab-cdef01234567
 ```
 

@@ -25,13 +25,13 @@ use std::net::IpAddr;
 
 use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase, dpu_node_cr_name};
 use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use libredfish::SystemPowerControl;
 use model::hardware_info::HardwareInfo;
 use model::machine::{
-    DpfState, DpuInitState, DpuReprovisionStates, FailureCause, FailureDetails, FailureSource,
-    InstanceState, Machine, ManagedHostState, ManagedHostStateSnapshot, PerformPowerOperation,
-    ReprovisionState, StateMachineArea,
+    DpfState, DpuInitState, DpuMachine, DpuReprovisionStates, FailureCause, FailureDetails,
+    FailureSource, InstanceState, Machine, ManagedHostState, ManagedHostStateSnapshot,
+    PerformPowerOperation, ReprovisionState, StateMachineArea,
 };
 use model::rack_type::{RackProductFamily, select_dpu_nvconfig_profile};
 use state_controller::state_handler::{
@@ -52,14 +52,14 @@ fn dpf_error(error: DpfError) -> StateHandlerError {
     ExternalServiceError::with_source("dpf", "", error.to_string(), "dpf_error", error).into()
 }
 
-fn bmc_ip(machine: &Machine) -> Result<IpAddr, StateHandlerError> {
+fn bmc_ip(machine: &Machine<impl MachineIdSubtypeTrait>) -> Result<IpAddr, StateHandlerError> {
     machine.status.bmc_info.ip.ok_or_else(|| {
         StateHandlerError::GenericError(eyre::eyre!("BMC IP is not set for machine {}", machine.id))
     })
 }
 
 // wrapper so we can get an error without copying it at every call site
-fn dpf_id(machine: &Machine) -> Result<String, StateHandlerError> {
+fn dpf_id(machine: &Machine<impl MachineIdSubtypeTrait>) -> Result<String, StateHandlerError> {
     machine.dpf_id().ok_or_else(|| {
         StateHandlerError::InvalidState(format!("BMC MAC is not set for machine {}", machine.id))
     })
@@ -281,7 +281,11 @@ fn transition_all_dpus_to_dpf_state(
         | ManagedHostState::Assigned {
             instance_state: InstanceState::DPUReprovision { .. },
         } => {
-            let all_dpu_ids = state.dpu_snapshots.iter().map(|x| &x.id).collect();
+            let all_dpu_ids = state
+                .dpu_snapshots
+                .iter()
+                .map(|dpu| dpu.id)
+                .collect::<Vec<_>>();
             ReprovisionState::DpfStates { substate: next_dpf }.next_state_with_all_dpus_updated(
                 &state.managed_state,
                 &state.dpu_snapshots,
@@ -298,7 +302,7 @@ fn transition_all_dpus_to_dpf_state(
 /// Use when persisting a phase change or moving one DPU to the next DpfState.
 fn set_one_dpu_dpf_state(
     state: &ManagedHostStateSnapshot,
-    dpu_id: &MachineId,
+    dpu_id: &DpuMachineId,
     next_dpf: DpfState,
 ) -> Result<ManagedHostState, StateHandlerError> {
     let mut next_state = state.managed_state.clone();
@@ -334,7 +338,7 @@ fn set_one_dpu_dpf_state(
 /// Otherwise return a `Wait` with the given reason.
 fn update_phase_detail_or_wait(
     state: &ManagedHostStateSnapshot,
-    dpu_id: &MachineId,
+    dpu_id: &DpuMachineId,
     stored_phase_detail: &Option<String>,
     current_phase: &carbide_dpf::DpuPhase,
     wait_reason: &str,
@@ -371,7 +375,11 @@ fn waiting_for_ready_exit_state(
         | ManagedHostState::Assigned {
             instance_state: InstanceState::DPUReprovision { .. },
         } => {
-            let all_dpu_ids = state.dpu_snapshots.iter().map(|x| &x.id).collect();
+            let all_dpu_ids = state
+                .dpu_snapshots
+                .iter()
+                .map(|dpu| dpu.id)
+                .collect::<Vec<_>>();
             ReprovisionState::WaitingForNetworkConfig.next_state_with_all_dpus_updated(
                 &state.managed_state,
                 &state.dpu_snapshots,
@@ -512,7 +520,11 @@ fn dpf_cr_creation_failed(
         failed_at: chrono::Utc::now(),
         source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
     };
-    StateHandlerOutcome::transition(make_failure_state(state, details, state.host_snapshot.id))
+    StateHandlerOutcome::transition(make_failure_state(
+        state,
+        details,
+        state.host_snapshot.id.into(),
+    ))
 }
 
 fn dpf_deployment_selection_failed(
@@ -526,7 +538,11 @@ fn dpf_deployment_selection_failed(
         failed_at: chrono::Utc::now(),
         source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
     };
-    StateHandlerOutcome::transition(make_failure_state(state, details, state.host_snapshot.id))
+    StateHandlerOutcome::transition(make_failure_state(
+        state,
+        details,
+        state.host_snapshot.id.into(),
+    ))
 }
 
 /// Builds the terminal failure used when a deployment was selected but the
@@ -545,7 +561,11 @@ fn dpf_deployment_migration_failed(
         failed_at: chrono::Utc::now(),
         source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
     };
-    StateHandlerOutcome::transition(make_failure_state(state, details, state.host_snapshot.id))
+    StateHandlerOutcome::transition(make_failure_state(
+        state,
+        details,
+        state.host_snapshot.id.into(),
+    ))
 }
 
 /// Handle DpfState::Provisioning: register all DPU devices and the node, then
@@ -689,12 +709,13 @@ async fn handle_dpf_handle_reboot(
 /// phase/error checks, and per-DPU transition to DeviceReady.
 async fn handle_dpf_waiting_for_ready(
     state: &ManagedHostStateSnapshot,
-    dpu_snapshot: &Machine,
+    dpu_snapshot: &DpuMachine,
     waiting_phase_detail: &Option<String>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let dpu_machine_id = dpu_snapshot.id;
     let node_name = dpu_node_cr_name(&dpf_id(&state.host_snapshot)?);
     let dpu_device_name = dpf_id(dpu_snapshot)?;
     // During a deployment migration the source and target DPUSet reuse the
@@ -804,21 +825,21 @@ async fn handle_dpf_waiting_for_ready(
         return Ok(StateHandlerOutcome::transition(make_failure_state(
             state,
             details,
-            dpu_snapshot.id,
+            dpu_snapshot.id.into(),
         )));
     }
     // wait for dpf to report that the dpu is ready
     if current_phase != carbide_dpf::DpuPhase::Ready {
         return update_phase_detail_or_wait(
             state,
-            &dpu_snapshot.id,
+            &dpu_machine_id,
             waiting_phase_detail,
             &current_phase,
             "Waiting for DPU to reach Ready phase",
         );
     }
 
-    let next = set_one_dpu_dpf_state(state, &dpu_snapshot.id, DpfState::DeviceReady)?;
+    let next = set_one_dpu_dpf_state(state, &dpu_machine_id, DpfState::DeviceReady)?;
     Ok(StateHandlerOutcome::transition(next))
 }
 
@@ -933,11 +954,12 @@ pub(super) async fn handle_dpf_deployment_migration(
 /// Else handle the reprovisioning of a single DPU
 async fn handle_dpf_reprovisioning(
     state: &ManagedHostStateSnapshot,
-    dpu_snapshot: &Machine,
+    dpu_snapshot: &DpuMachine,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let dpu_machine_id = dpu_snapshot.id;
     let node_name = dpu_node_cr_name(&dpf_id(&state.host_snapshot)?);
     let dpf_dpudevices_and_dpunode_crs_noexist =
         crate::dpf::dpf_dpudevices_and_dpunode_crs_noexist(state, dpf_sdk)
@@ -972,7 +994,7 @@ async fn handle_dpf_reprovisioning(
         .map_err(dpf_error)?;
     let next = set_one_dpu_dpf_state(
         state,
-        &dpu_snapshot.id,
+        &dpu_machine_id,
         DpfState::WaitingForReady { phase_detail: None },
     )?;
     Ok(StateHandlerOutcome::transition(next))
@@ -1053,12 +1075,13 @@ async fn machine_has_astra_nics(
 /// barrier that waits for all DPUs before proceeding.
 pub(super) async fn handle_dpf_state(
     state: &ManagedHostStateSnapshot,
-    dpu_snapshot: &Machine,
+    dpu_snapshot: &DpuMachine,
     dpf_state: &DpfState,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     dpf_sdk: &dyn DpfOperations,
     power_down_wait: chrono::Duration,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let dpu_machine_id = dpu_snapshot.id;
     let node_name = dpu_node_cr_name(&dpf_id(&state.host_snapshot)?);
 
     let astra_nics = machine_has_astra_nics(state, ctx).await?;
@@ -1139,7 +1162,7 @@ pub(super) async fn handle_dpf_state(
             return Ok(StateHandlerOutcome::transition(make_failure_state(
                 state,
                 details,
-                state.host_snapshot.id,
+                state.host_snapshot.id.into(),
             )));
         }
     }
@@ -1182,7 +1205,7 @@ pub(super) async fn handle_dpf_state(
         }
         DpfState::Unknown => {
             tracing::warn!(dpu_machine_id = %dpu_snapshot.id, "unknown DPF state in DB, transitioning to provisioning");
-            let next = set_one_dpu_dpf_state(state, &dpu_snapshot.id, DpfState::Provisioning)?;
+            let next = set_one_dpu_dpf_state(state, &dpu_machine_id, DpfState::Provisioning)?;
             Ok(StateHandlerOutcome::transition(next))
         }
     }

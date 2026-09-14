@@ -17,7 +17,7 @@
 
 use clap::Parser;
 
-use crate::component_manager::common::DeviceTargetArgs;
+use crate::component_manager::common::{ComputeTraySelection, DeviceTargetArgs, SwitchSelection};
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -27,9 +27,17 @@ Get firmware update status for switches:
     $ nico-admin-cli component-manager get-firmware-update-status switch \
     --switch-id 12345678-1234-5678-90ab-cdef01234567
 
+Get status for a switch by BMC MAC (targets the switch before ingestion):
+    $ nico-admin-cli component-manager get-firmware-update-status switch \
+    --mac-address 00:11:22:33:44:55
+
 Get status for several compute trays at once:
     $ nico-admin-cli component-manager get-firmware-update-status compute-tray \
     --machine-id 12345678-1234-5678-90ab-cdef01234567,abcdef01-2345-6789-abcd-ef0123456789
+
+Get status for a compute tray by BMC MAC (targets the tray before ingestion):
+    $ nico-admin-cli component-manager get-firmware-update-status compute-tray \
+    --mac-address 00:11:22:33:44:55
 
 Get status for an entire rack:
     $ nico-admin-cli component-manager get-firmware-update-status rack \
@@ -45,11 +53,16 @@ impl From<Args> for rpc::forge::GetComponentFirmwareStatusRequest {
     fn from(args: Args) -> Self {
         match args.target {
             DeviceTargetArgs::Switch(target) => Self {
-                target: Some(
-                    rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
-                        target.into(),
-                    ),
-                ),
+                target: Some(match target.into_selection() {
+                    SwitchSelection::SwitchIds(list) => {
+                        rpc::forge::get_component_firmware_status_request::Target::SwitchIds(list)
+                    }
+                    SwitchSelection::Macs(macs) => {
+                        rpc::forge::get_component_firmware_status_request::Target::SwitchBmcMacs(
+                            macs,
+                        )
+                    }
+                }),
             },
             DeviceTargetArgs::PowerShelf(target) => Self {
                 target: Some(
@@ -59,11 +72,16 @@ impl From<Args> for rpc::forge::GetComponentFirmwareStatusRequest {
                 ),
             },
             DeviceTargetArgs::ComputeTray(target) => Self {
-                target: Some(
-                    rpc::forge::get_component_firmware_status_request::Target::MachineIds(
-                        target.into(),
-                    ),
-                ),
+                target: Some(match target.into_selection() {
+                    ComputeTraySelection::MachineIds(list) => {
+                        rpc::forge::get_component_firmware_status_request::Target::MachineIds(list)
+                    }
+                    ComputeTraySelection::Macs(macs) => {
+                        rpc::forge::get_component_firmware_status_request::Target::ComputeBmcMacs(
+                            macs,
+                        )
+                    }
+                }),
             },
             DeviceTargetArgs::Rack(target) => Self {
                 target: Some(

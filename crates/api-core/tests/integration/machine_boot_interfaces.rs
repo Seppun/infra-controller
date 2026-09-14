@@ -78,7 +78,7 @@ async fn test_expected_machine_selection_source_survives_ingestion(
         .api()
         .get_machine_boot_interfaces(tonic::Request::new(
             forge::GetMachineBootInterfacesRequest {
-                machine_id: Some(host.host.id),
+                machine_id: Some(host.host.id.into()),
             },
         ))
         .await?
@@ -200,13 +200,13 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
         .api()
         .get_machine_boot_interfaces(tonic::Request::new(
             forge::GetMachineBootInterfacesRequest {
-                machine_id: Some(host_id),
+                machine_id: Some(host_id.into()),
             },
         ))
         .await?
         .into_inner();
 
-    assert_eq!(report.machine_id, Some(host_id));
+    assert_eq!(report.machine_id, Some(host_id.into()));
 
     // The desired-state view names the boot target Site Explorer persisted for
     // this host. The fixture runs Site Explorer but no machine-controller
@@ -377,7 +377,7 @@ async fn test_get_machine_boot_interfaces_agrees_when_only_owned_rows_exist(
         .api()
         .get_machine_boot_interfaces(tonic::Request::new(
             forge::GetMachineBootInterfacesRequest {
-                machine_id: Some(host_id),
+                machine_id: Some(host_id.into()),
             },
         ))
         .await?

@@ -33,7 +33,7 @@ trait DbMachineCleanupExt {
     async fn update_cleanup_time(&self, txn: &mut sqlx::PgTransaction<'_>);
 }
 
-impl DbMachineCleanupExt for model::machine::Machine {
+impl DbMachineCleanupExt for model::machine::AnyMachine {
     async fn clear_cleanup_time(&self, txn: &mut sqlx::PgTransaction<'_>) {
         db::machine::clear_cleanup_time(&self.id, txn.as_mut())
             .await
@@ -405,7 +405,7 @@ async fn failed_discovery_returns_discovery(pool: PgPool) {
             failed_at: chrono::Utc::now(),
             source: FailureSource::Scout,
         },
-        machine_id: mh.host.id,
+        machine_id: mh.host.id.into(),
         retry_count: 0,
     })
     .await;

@@ -67,7 +67,7 @@ async fn creates_and_updates_power_options(pool: PgPool) -> Result<(), Box<dyn s
     env.api()
         .set_maintenance(Request::new(MaintenanceRequest {
             operation: MaintenanceOperation::Enable as i32,
-            host_id: Some(mh.host.id),
+            host_id: Some(mh.host.id.into()),
             reference: Some("testing".to_string()),
         }))
         .await?;

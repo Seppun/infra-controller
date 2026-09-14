@@ -2381,7 +2381,11 @@ async fn test_rack_switch_create_instance_with_nvl_config_use_nmxc_simulator(poo
     .await
     .expect("create managed host");
     let mh = TestManagedHost {
-        id: mh_snapshot.host_snapshot.id,
+        id: mh_snapshot
+            .host_snapshot
+            .id
+            .try_into()
+            .expect("host snapshot ID should be a valid HostMachineId"),
         dpu_ids: mh_snapshot
             .dpu_snapshots
             .into_iter()

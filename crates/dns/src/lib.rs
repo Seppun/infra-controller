@@ -46,6 +46,8 @@ use tracing::{Instrument, error, info, warn};
 
 pub mod config;
 mod negative_cache;
+#[cfg(test)]
+mod test_sockets;
 
 use crate::config::Config;
 use crate::negative_cache::{CacheKey, NegativeCache};
@@ -596,6 +598,19 @@ impl DnsServer {
         Ok(records)
     }
 
+    fn register_sockets(
+        self,
+        udp_socket: UdpSocket,
+        tcp_socket: TcpListener,
+    ) -> hickory_server::Server<Self> {
+        let mut server = hickory_server::Server::new(self);
+        server.register_socket(udp_socket);
+        // 32 is hickory_server's default response buffer size when run as a
+        // binary; match it here.
+        server.register_listener(tcp_socket, Duration::new(5, 0), 32);
+        server
+    }
+
     pub async fn run(config: Config) -> Result<(), Report> {
         let listen = config.listen_address;
 
@@ -657,14 +672,9 @@ impl DnsServer {
             }
         });
 
-        let mut srv = hickory_server::Server::new(server);
         let udp_socket = UdpSocket::bind(&listen).await?;
-        srv.register_socket(udp_socket);
-
         let tcp_socket = TcpListener::bind(&listen).await?;
-        // 32 is hickory_server's default response buffer size when run as a
-        // binary; match it here.
-        srv.register_listener(tcp_socket, Duration::new(5, 0), 32);
+        let mut srv = server.register_sockets(udp_socket, tcp_socket);
 
         info!(
             listen_address = %listen,
@@ -1004,7 +1014,9 @@ mod tests {
     /// details kept as native structured values.
     #[test]
     fn dns_request_completed_pairs_its_histogram_and_log() {
-        use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
+        use carbide_instrument::testing::{
+            ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
+        };
         use carbide_test_support::{Check, check_values};
 
         struct RequestCompletedCase {
@@ -1035,7 +1047,7 @@ mod tests {
             record_count_kind: Option<CapturedFieldKind>,
             duration_milliseconds_kind: Option<CapturedFieldKind>,
             histogram_count: u64,
-            histogram_sum: f64,
+            histogram_sum: ApproxHistogramSum,
         }
 
         check_values(
@@ -1068,7 +1080,7 @@ mod tests {
                         record_count_kind: Some(CapturedFieldKind::I64),
                         duration_milliseconds_kind: Some(CapturedFieldKind::F64),
                         histogram_count: 1,
-                        histogram_sum: 250.0,
+                        histogram_sum: ApproxHistogramSum(250.0),
                     },
                 },
                 Check {
@@ -1099,7 +1111,7 @@ mod tests {
                         record_count_kind: Some(CapturedFieldKind::I64),
                         duration_milliseconds_kind: Some(CapturedFieldKind::F64),
                         histogram_count: 1,
-                        histogram_sum: 1_500.0,
+                        histogram_sum: ApproxHistogramSum(1_500.0),
                     },
                 },
             ],

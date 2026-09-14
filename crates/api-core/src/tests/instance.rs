@@ -22,7 +22,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use ::rpc::forge::forge_server::Forge;
+use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::instance::InstanceId;
+use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
@@ -34,7 +36,7 @@ use common::api_fixtures::instance::{
 use common::api_fixtures::tenant::create_fixture_tenant;
 use common::api_fixtures::tpm_attestation::{CA_CERT_SERIALIZED, EK_CERT_SERIALIZED};
 use common::api_fixtures::{
-    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides, dpu,
+    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides,
     get_config, inject_machine_measurements, network_configured_with_health,
     network_configured_with_health_and_ext_services, persist_machine_validation_result,
     populate_network_security_groups, site_explorer,
@@ -49,16 +51,12 @@ use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use itertools::Itertools;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpu_machine_update::DpuMachineUpdate;
-use model::instance::config::extension_services::InstanceExtensionServicesConfig;
-use model::instance::config::infiniband::InstanceInfinibandConfig;
 use model::instance::config::network::{
     DeviceLocator, InstanceInterfaceIpFamilyMode, InstanceInterfaceVpcSelection,
     InstanceNetworkConfig, Ipv6InterfaceConfig, NetworkDetails,
 };
-use model::instance::config::nvlink::InstanceNvLinkConfig;
-use model::instance::config::spx::InstanceSpxConfig;
 use model::machine::{
-    AttestationMode, CleanupContext, CleanupState, FailureDetails, InstanceState, Machine,
+    AttestationMode, CleanupContext, CleanupState, FailureDetails, HostMachine, InstanceState,
     MachineState, MachineValidatingState, ManagedHostState, MeasuringState,
     NetworkConfigUpdateState, SpdmMeasuringState, ValidationState,
 };
@@ -81,9 +79,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tonic::Request;
 
 use crate::cfg::file::VmaasConfig;
-use crate::instance::{allocate_instance, allocate_network};
+use crate::instance::allocate_network;
 use crate::network_segment::allocate::PrefixAllocator;
 use crate::test_support::fixture_config::FixtureDefault as _;
+use crate::test_support::metadata;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::instance::single_interface_network_config_with_vfs;
@@ -239,7 +238,7 @@ async fn test_allocate_and_release_instance_impl(
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(&fetched_instance.machine_id, &mh.host().id);
+    assert_eq!(&fetched_instance.machine_id, &mh.host().id.into());
     for (segment_index, segment_id) in segment_ids.iter().enumerate() {
         let expected_count = if segment_index < instance_interface_count {
             1
@@ -341,8 +340,7 @@ async fn test_allocate_and_release_instance_impl(
     txn.commit().await.unwrap();
 }
 
-#[crate::sqlx_test]
-async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready(
+async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready_body(
     _: PgPoolOptions,
     options: PgConnectOptions,
 ) {
@@ -397,7 +395,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     txn.commit().await.unwrap();
 
     let device_locator = host_machine
-        .get_device_locator_for_dpu_id(&mh.dpu().id)
+        .get_device_locator_for_dpu_id(&mh.dpu_ids[0])
         .unwrap();
 
     // send the request to create the instance
@@ -480,7 +478,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(fetched_instance.machine_id, mh.host().id);
+    assert_eq!(fetched_instance.machine_id, mh.host().id.into());
     assert_eq!(
         db::instance_address::count_by_segment_id(&mut txn, &segment_id)
             .await
@@ -827,6 +825,25 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     txn.commit().await.unwrap();
 }
 
+#[test]
+fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready() {
+    let mut args = ::sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready"
+    ));
+    args.fixtures(Box::leak(Box::new(vec![])));
+
+    let test_fn: fn(PgPoolOptions, PgConnectOptions) -> _ =
+        test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready_body;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .expect("failed to spawn measurement test thread")
+        .join()
+        .expect("measurement test thread panicked");
+}
+
 #[crate::sqlx_test]
 async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnectOptions) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
@@ -880,7 +897,7 @@ async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnect
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(fetched_instance.machine_id, mh.host().id);
+    assert_eq!(fetched_instance.machine_id, mh.host().id.into());
 
     assert_eq!(fetched_instance.metadata.name, "test_instance_with_labels");
     assert_eq!(
@@ -926,7 +943,7 @@ async fn test_allocate_instance_with_invalid_metadata(_: PgPoolOptions, options:
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
 
-    for (invalid_metadata, expected_err) in common::metadata::invalid_metadata_testcases(true) {
+    for (invalid_metadata, expected_err) in metadata::invalid_metadata_testcases(true) {
         let tenant_config = default_tenant_config();
         let config = InstanceConfig::builder()
             .tenant(tenant_config)
@@ -1060,7 +1077,7 @@ async fn test_instance_dns_resolution(_: PgPoolOptions, options: PgConnectOption
         .api
         .get_managed_host_network_config(tonic::Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: mh.dpu().id.into(),
+                dpu_machine_id: Some(mh.dpu().id),
             },
         ))
         .await
@@ -1122,7 +1139,7 @@ async fn test_instance_null_hostname(_: PgPoolOptions, options: PgConnectOptions
         .api
         .get_managed_host_network_config(tonic::Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: mh.dpu().id.into(),
+                dpu_machine_id: Some(mh.dpu().id),
             },
         ))
         .await
@@ -1347,8 +1364,6 @@ async fn test_instance_deletion_before_provisioning_finishes(
         },
     )
     .await;
-    env.run_machine_state_controller_iteration().await;
-    mh.host().reboot_completed().await;
 
     // Now go through regular deletion
     mh.delete_instance(&env, instance_id).await;
@@ -1390,7 +1405,7 @@ async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
 
     fn post_config_wait_health() -> rpc::health::HealthReport {
         dpu_health_alert(
-            "PostConfigCheckWait",
+            health_report::HealthProbeId::post_config_check_wait().as_str(),
             None,
             vec![
                 health_report::HealthAlertClassification::prevent_allocations(),
@@ -1464,7 +1479,7 @@ async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
-    let dpu_id = mh.dpu().id;
+    let dpu_id = mh.dpu_ids[0];
 
     let config = InstanceConfig::default_tenant_and_os()
         .network(single_interface_network_config(segment_id));
@@ -1554,8 +1569,6 @@ async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
 
     // Clearing the last PXE blocking Merge report lets provisioning reach Ready.
     remove_health_report_entry(&env, &dpu_id, "test-pxe-bgp-merge".to_string()).await;
-    env.run_machine_state_controller_iteration().await;
-    mh.host().reboot_completed().await;
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.host().id,
         1,
@@ -1564,6 +1577,142 @@ async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
         },
     )
     .await;
+}
+
+#[crate::sqlx_test]
+async fn test_instance_release_waits_for_primary_dpu_network_health_before_discovery_reboot(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    const DPU_NETWORK_READY_WAIT_REASON: &str =
+        "Waiting for the primary DPU network to become ready before PXE reboot";
+
+    fn agent_health(alert_id: Option<health_report::HealthProbeId>) -> rpc::health::HealthReport {
+        rpc::health::HealthReport {
+            source: "forge-dpu-agent".to_string(),
+            triggered_by: None,
+            observed_at: None,
+            successes: vec![],
+            alerts: alert_id
+                .map(|id| rpc::health::HealthProbeAlert {
+                    id: id.to_string(),
+                    target: None,
+                    in_alert_since: None,
+                    message: "test primary DPU network health".to_string(),
+                    tenant_message: None,
+                    classifications: vec![
+                        health_report::HealthAlertClassification::prevent_allocations().to_string(),
+                        health_report::HealthAlertClassification::prevent_host_state_changes()
+                            .to_string(),
+                    ],
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    async fn assert_release_is_waiting(env: &TestEnv, mh: &TestManagedHost, scenario: &str) {
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &ManagedHostState::Assigned {
+                instance_state: InstanceState::WaitingForDpusToUp,
+            },
+            "{scenario}",
+        );
+        let Some(PersistentStateHandlerOutcome::Wait { reason, .. }) =
+            &host.controller_state_outcome
+        else {
+            panic!("{scenario}: release gate should persist a Wait outcome");
+        };
+        assert_eq!(reason, DPU_NETWORK_READY_WAIT_REASON, "{scenario}");
+        txn.commit().await.unwrap();
+    }
+
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+    let instance = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    env.api
+        .release_instance(tonic::Request::new(InstanceReleaseRequest {
+            id: Some(instance.id),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await
+        .expect("Delete instance failed.");
+
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        &mut txn,
+        &mh.host().id,
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForDpusToUp,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let redfish_checkpoint = env.redfish_sim.timepoint();
+    network_configured_with_health(
+        &env,
+        &mh.dpu_ids[0],
+        Some(agent_health(Some(
+            health_report::HealthProbeId::nvue_api_running(),
+        ))),
+    )
+    .await;
+    env.run_machine_state_controller_iteration().await;
+    assert_release_is_waiting(&env, &mh, "NVUE API is unavailable").await;
+
+    let power_actions = env
+        .redfish_sim
+        .actions_since(&redfish_checkpoint)
+        .all_hosts()
+        .into_iter()
+        .filter(|action| matches!(action, RedfishSimAction::Power(_)))
+        .collect::<Vec<_>>();
+    assert!(
+        power_actions.is_empty(),
+        "release must not reboot the host before primary DPU network health is ready: {power_actions:?}",
+    );
+
+    network_configured_with_health(&env, &mh.dpu_ids[0], Some(agent_health(None))).await;
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        mh.host().db_machine(&mut txn).await.current_state(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::BootingWithDiscoveryImage {
+                retry: model::machine::RetryInfo { count: 0 },
+            },
+        }
+    );
+    txn.commit().await.unwrap();
+
+    let power_actions = env
+        .redfish_sim
+        .actions_since(&redfish_checkpoint)
+        .all_hosts()
+        .into_iter()
+        .filter(|action| matches!(action, RedfishSimAction::Power(_)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        power_actions,
+        vec![RedfishSimAction::Power(
+            libredfish::SystemPowerControl::ForceRestart,
+        )],
+    );
 }
 
 #[crate::sqlx_test]
@@ -1722,53 +1871,6 @@ async fn test_instance_cloud_init_metadata(
 }
 
 #[crate::sqlx_test]
-async fn test_can_not_create_instance_for_dpu(_: PgPoolOptions, options: PgConnectOptions) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-    let vpc_id = db::vpc::find_by_segment(&env.pool, segment_id)
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
-    let host_config = env.managed_host_config();
-    let dpu_machine_id = dpu::create_dpu_machine(&env, &host_config).await;
-    let request = crate::instance::InstanceAllocationRequest {
-        instance_id: InstanceId::new(),
-        machine_id: dpu_machine_id,
-        instance_type_id: None,
-        config: model::instance::config::InstanceConfig {
-            os: default_os_config().try_into().unwrap(),
-            tenant: default_tenant_config().try_into().unwrap(),
-            network: InstanceNetworkConfig::for_segment_ids(&[segment_id], &[], &[vpc_id]),
-            infiniband: InstanceInfinibandConfig::default(),
-            nvlink: InstanceNvLinkConfig::default(),
-            spxconfig: InstanceSpxConfig::default(),
-            network_security_group_id: None,
-            extension_services: InstanceExtensionServicesConfig::default(),
-            power_profile: None,
-        },
-        metadata: Metadata {
-            name: "test_instance".to_string(),
-            description: "tests/instance".to_string(),
-            labels: HashMap::new(),
-        },
-        allow_unhealthy_machine: false,
-    };
-
-    // Note: This also requests a background task in the DB for creating managed
-    // resources. That's however ok - we will just ignore it and not execute
-    // that task. Later we might also verify that the creation of those resources
-    // is requested
-    let result = allocate_instance(&env.api, request, env.config.host_health).await;
-    let error = result.expect_err("expected allocation to fail").to_string();
-    assert!(
-        error.contains("is of type DPU and can not be converted into an instance"),
-        "Error message should contain 'is of type Dpu and can not be converted into an instance', but is {error}"
-    );
-}
-
-#[crate::sqlx_test]
 // This test verifies parity between `addresses` and the compatibility fields.
 #[allow(deprecated)]
 async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOptions) {
@@ -1877,7 +1979,7 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
         .api
         .get_managed_host_network_config(tonic::Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: mh.dpu().id.into(),
+                dpu_machine_id: Some(mh.dpu().id),
             },
         ))
         .await
@@ -2381,7 +2483,7 @@ async fn test_allocate_instance_with_old_network_segemnt(
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(fetched_instance.machine_id, mh.id);
+    assert_eq!(fetched_instance.machine_id, mh.id.into());
 
     let network_config = fetched_instance.config.network;
     assert_eq!(fetched_instance.network_config_version.version_nr(), 1);
@@ -2587,7 +2689,7 @@ async fn test_allocate_and_release_instance_vpc_prefix_id(
     let snapshot = mh.snapshot(&mut txn).await;
 
     let fetched_instance = snapshot.instance.unwrap();
-    assert_eq!(fetched_instance.machine_id, mh.id);
+    assert_eq!(fetched_instance.machine_id, mh.id.into());
     assert_eq!(
         db::instance_address::count_by_segment_id(
             &mut txn,
@@ -3107,7 +3209,7 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: managed_host.dpu().id.into(),
+                dpu_machine_id: Some(managed_host.dpu().id),
             },
         ))
         .await
@@ -3320,7 +3422,7 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: dual_stack_host.dpu().id.into(),
+                dpu_machine_id: Some(dual_stack_host.dpu().id),
             },
         ))
         .await
@@ -3448,12 +3550,12 @@ async fn create_manual_slaac_segment_fixture(
 /// explicit in each test.
 async fn seed_empty_instance_for_network_allocation(
     env: &TestEnv,
-) -> (InstanceId, Machine, ConfigVersion) {
+) -> (InstanceId, HostMachine, ConfigVersion) {
     let managed_host = create_managed_host(env).await;
     let instance_id = InstanceId::new();
     let network_config_version = ConfigVersion::initial();
     let mut txn = env.db_txn().await;
-    let machine = managed_host.host().db_machine(&mut txn).await;
+    let machine = managed_host.host_as_any().db_machine(&mut txn).await;
     sqlx::query(
         "INSERT INTO instances (id, machine_id, network_config, network_config_version, \
                                 nvlink_config) \
@@ -4289,7 +4391,7 @@ async fn assert_ipv6_only_resolution(
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: managed_host.dpu().id.into(),
+                dpu_machine_id: Some(managed_host.dpu().id),
             },
         ))
         .await
@@ -4433,7 +4535,7 @@ async fn assert_dual_stack_resolution(
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: managed_host.dpu().id.into(),
+                dpu_machine_id: Some(managed_host.dpu().id),
             },
         ))
         .await
@@ -4748,6 +4850,11 @@ async fn test_allocate_and_update_with_network_security_group(
     let mh = site_explorer::new_host(&env, ManagedHostConfig::default())
         .await
         .unwrap();
+    let host_machine_id: StableHostMachineId = mh
+        .host_snapshot
+        .id
+        .try_into()
+        .expect("newly ingested host should have a stable ID");
 
     let segment_id = env.create_vpc_and_tenant_segment().await;
 
@@ -4759,7 +4866,7 @@ async fn test_allocate_and_update_with_network_security_group(
         .api
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
-                .machine_id(mh.host_snapshot.id)
+                .machine_id(host_machine_id)
                 .config(
                     InstanceConfig::default_tenant_and_os()
                         .network(single_interface_network_config(segment_id))
@@ -4782,7 +4889,7 @@ async fn test_allocate_and_update_with_network_security_group(
         .api
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
-                .machine_id(mh.host_snapshot.id)
+                .machine_id(host_machine_id)
                 .config(
                     InstanceConfig::default_tenant_and_os()
                         .network(single_interface_network_config(segment_id))
@@ -5223,8 +5330,15 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
+
+    // Register the tenant required by both FNN VPCs used in this allocation scenario.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
 
     // Create two FNN VPCs and prefixes to exercise cross-VPC allocation.
     let first_vpc = env
@@ -5380,7 +5494,7 @@ async fn test_fnn_vrf_loopbacks_are_per_vpc_for_pf_and_vf_on_one_dpu(pool: sqlx:
     let first_vpc = first_vpc.expect("first VPC should be present");
     let second_vpc = second_vpc.expect("second VPC should be present");
     let mh = create_managed_host(&env).await;
-    let dpu_id = mh.dpu().id;
+    let dpu_id = mh.dpu_ids[0];
     let instance = mh
         .instance_builer(&env)
         .network(single_interface_network_config_with_vfs(vec![
@@ -5522,8 +5636,15 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let mh = create_managed_host(&env).await;
+
+    // Register the tenant required by both FNN VPCs used in this validation scenario.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
 
     // Create two FNN VPCs so the global multi-FNN check passes.
     let first_vpc = env
@@ -6184,7 +6305,7 @@ async fn test_instance_creation_when_reprovision_is_triggered_parallel(
     // Step 2: Trigger DPU reprovision.
     let mut txn = env.db_txn().await;
     let machine_update = DpuMachineUpdate {
-        host_machine_id: mh.host().id,
+        host_machine_id: mh.id.into(),
         dpu_machine_id: mh.dpu_ids[0],
         firmware_version: "test".to_string(),
         dpf_managed: false,
@@ -6860,7 +6981,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
     let instance = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
                 tenant: Some(default_tenant_config()),
@@ -7352,7 +7473,7 @@ async fn test_extension_service_removed_after_all_dpus_report_terminated(
     let instance_id = tinstance.id;
 
     // Explicitly mock healthy/running extension-service status from the DPU.
-    network_configured_with_health_and_ext_services(&env, &mh.dpu().id, None, None).await;
+    network_configured_with_health_and_ext_services(&env, &mh.dpu_ids[0], None, None).await;
 
     // Remove all extension services from desired config.
     env.api
@@ -7431,7 +7552,7 @@ async fn test_extension_service_removed_after_all_dpus_report_terminated(
     // Instance config and status should no long have the extension services.
     network_configured_with_health_and_ext_services(
         &env,
-        &mh.dpu().id,
+        &mh.dpu_ids[0],
         None,
         Some(rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated),
     )
@@ -7535,7 +7656,7 @@ async fn test_extension_services_status_observation(
     let dpu_observation = instance_snapshot
         .observations
         .extension_services
-        .get(&mh.dpu().id)
+        .get(&mh.dpu_ids[0])
         .and_then(|observations| {
             observations
                 .for_service_type(model::extension_service::ExtensionServiceType::KubernetesPod)
@@ -7629,7 +7750,7 @@ async fn test_allocate_instance_with_invalid_os_image(
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
                 tenant: Some(default_tenant_config()),
@@ -7692,7 +7813,7 @@ async fn test_allocate_instance_with_invalid_ib_partition(
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
                 tenant: Some(default_tenant_config()),
@@ -7745,7 +7866,7 @@ async fn test_can_not_create_instances_with_machine_in_quarantine(
     env.api
         .set_managed_host_quarantine_state(tonic::Request::new(
             rpc::forge::SetManagedHostQuarantineStateRequest {
-                machine_id: Some(host_machine_id),
+                machine_id: Some(host_machine_id.into()),
                 quarantine_state: Some(rpc::forge::ManagedHostQuarantineState {
                     mode: ManagedHostQuarantineMode::BlockAllTraffic as i32,
                     reason: Some("test".to_string()),

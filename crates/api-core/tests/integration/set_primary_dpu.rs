@@ -19,7 +19,9 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     FixtureDefault as _, ManagedHostConfigExt as _,
 };
-use carbide_uuid::machine::{MachineId, MachineIdSource, MachineInterfaceId, MachineType};
+use carbide_uuid::machine::{
+    DpuMachineId, MachineId, MachineIdSource, MachineInterfaceId, MachineType, StableHostMachineId,
+};
 use model::expected_machine::{ExpectedMachineData, HostDpuPolicy};
 use model::test_support::ManagedHostConfig;
 use rpc::forge;
@@ -72,13 +74,23 @@ async fn test_set_primary_dpu_rejects_zero_dpu_host(
     let result = env
         .api()
         .set_primary_dpu(tonic::Request::new(forge::SetPrimaryDpuRequest {
-            host_machine_id: Some(zero_dpu_host.host.id),
+            host_machine_id: Some(
+                zero_dpu_host
+                    .host
+                    .id
+                    .try_into()
+                    .expect("zero-dpu host should have a stable ID after discovery"),
+            ),
             // Any well-formed DPU id; the handler bails before reading it.
-            dpu_machine_id: Some(MachineId::new(
-                MachineIdSource::ProductBoardChassisSerial,
-                [0u8; 32],
-                MachineType::Dpu,
-            )),
+            dpu_machine_id: Some(
+                MachineId::new(
+                    MachineIdSource::ProductBoardChassisSerial,
+                    [0u8; 32],
+                    MachineType::Dpu,
+                )
+                .try_into()
+                .unwrap(),
+            ),
             force_reconcile: false,
             ..Default::default()
         }))
@@ -119,13 +131,17 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
         .build()
         .await;
     host.host.discover_primary_iface(admin_segment).await;
-    let host_id = host.host.id;
+    let host_id: StableHostMachineId = host
+        .host
+        .id
+        .try_into()
+        .expect("host should have a stable ID after discovery");
 
     let (original_primary_id, stale_interface_id, stale_dpu_id, surviving_dpu_id): (
         MachineInterfaceId,
         MachineInterfaceId,
-        MachineId,
-        MachineId,
+        DpuMachineId,
+        DpuMachineId,
     ) = {
         let mut txn = env.db_txn().await;
         let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
@@ -166,12 +182,10 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
         .bind(stale_interface_id)
         .execute(&env.api().database_connection)
         .await?;
-    let desired_before = db::machine_desired_boot_interface::get(
-        &env.api().database_connection,
-        &host_id.try_into().unwrap(),
-    )
-    .await?
-    .expect("ingestion should initialize the desired target");
+    let desired_before =
+        db::machine_desired_boot_interface::get(&env.api().database_connection, &host_id)
+            .await?
+            .expect("ingestion should initialize the desired target");
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
         .bind(host_id.to_string())
         .execute(&env.api().database_connection)
@@ -208,12 +222,10 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
         primary_ids
     };
     assert_eq!(primary_ids, vec![original_primary_id]);
-    let desired_after = db::machine_desired_boot_interface::get(
-        &env.api().database_connection,
-        &host_id.try_into().unwrap(),
-    )
-    .await?
-    .expect("the original desired target should remain");
+    let desired_after =
+        db::machine_desired_boot_interface::get(&env.api().database_connection, &host_id)
+            .await?
+            .expect("the original desired target should remain");
     assert_eq!(desired_after.value, desired_before.value);
     assert_eq!(desired_after.version, desired_before.version);
 

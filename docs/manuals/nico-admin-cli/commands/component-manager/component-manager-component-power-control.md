@@ -46,7 +46,7 @@ backend
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -68,6 +68,7 @@ Print help (see a summary with -h)
 ```sh
 nico-admin-cli component-manager component-power-control switch --switch-id 12345678-1234-5678-90ab-cdef01234567 --action on
 nico-admin-cli component-manager component-power-control compute-tray --machine-id 12345678-1234-5678-90ab-cdef01234567 --action force-off
+nico-admin-cli component-manager component-power-control compute-tray --mac-address 00:11:22:33:44:55 --action force-off
 nico-admin-cli component-manager component-power-control power-shelf --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --action ac-powercycle
 ```
 

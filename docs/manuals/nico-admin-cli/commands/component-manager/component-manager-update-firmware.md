@@ -21,7 +21,7 @@ Queue component firmware updates
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -44,6 +44,7 @@ Print help (see a summary with -h)
 nico-admin-cli component-manager update-firmware switch --switch-id 12345678-1234-5678-90ab-cdef01234567 --target-version fw-1.2.3
 nico-admin-cli component-manager update-firmware switch --switch-id 12345678-1234-5678-90ab-cdef01234567 --component bmc,bios --force-update --target-version fw-1.2.3
 nico-admin-cli component-manager update-firmware compute-tray --machine-id 12345678-1234-5678-90ab-cdef01234567 --sot-json-file ./sot.json --access-token mytoken
+nico-admin-cli component-manager update-firmware compute-tray --mac-address 00:11:22:33:44:55 --sot-json-file ./sot.json
 nico-admin-cli component-manager update-firmware power-shelf --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --target-version fw-1.2.3
 nico-admin-cli component-manager update-firmware rack --rack-id 12345678-1234-5678-90ab-cdef01234567 --target-version fw-1.2.3
 ```
