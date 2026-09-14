@@ -2353,18 +2353,15 @@ fn append_gb200_label_suffix(label_key: &str) -> String {
 /// the `provisioning.dpu.nvidia.com/v1alpha1` `BlueFieldSoftware` CR.
 ///
 /// The PLDM firmware bundle is PSID-specific, so `pldm_fw_bundle` maps each PSID
-/// to its bundle URL. One `BlueFieldSoftware` CR and one DPUDeployment are
-/// created per PSID (see
-/// [`DpfDeploymentConfig::per_psid_deployment_name`] and
-/// [`DpfDeploymentConfig::per_psid_node_label_key`]).
+/// to its bundle URL. A single `BlueFieldSoftware` CR carries the complete map
+/// so DPF can select the matching bundle for each DPU model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DpfBlueFieldSoftwareConfig {
     /// OS ISO URL used by the DPU OS installation flow (`spec.osIso`). Shared
     /// across all PSIDs.
     pub os_iso: String,
-    /// Map of PSID → PLDM firmware bundle URL (`spec.pldmFwBundle`). Each entry
-    /// fans out to its own `BlueFieldSoftware` CR and DPUDeployment.
+    /// Map of PSID → PLDM firmware bundle URL (`spec.pldmFwBundle`).
     #[serde(default)]
     pub pldm_fw_bundle: BTreeMap<String, String>,
 }
@@ -2529,14 +2526,9 @@ impl DpfDeploymentsConfig {
                 (None, None) => errors.push(format!(
                     "deployment {name:?} sets neither bfb_url nor bluefield_software; set exactly one"
                 )),
-                // Exactly one PSID entry is allowed for now. Multi-PSID support
-                // is pending a DPF change that lets one `BlueFieldSoftware` CR
-                // carry a PSID→PLDM map; until then a single BF4 deployment uses
-                // the one entry's PLDM bundle.
-                (None, Some(bfs)) if bfs.pldm_fw_bundle.len() != 1 => errors.push(format!(
-                    "deployment {name:?} bluefield_software.pldm_fw_bundle must have exactly one \
-                     PSID → PLDM bundle URL entry (found {}).",
-                    bfs.pldm_fw_bundle.len()
+                (None, Some(bfs)) if bfs.pldm_fw_bundle.is_empty() => errors.push(format!(
+                    "deployment {name:?} bluefield_software.pldm_fw_bundle must have at least one \
+                     PSID → PLDM bundle URL entry.",
                 )),
                 _ => {}
             }
@@ -8097,16 +8089,7 @@ helm_repo_url = "oci://registry.example.test/doca"
     }
 
     #[test]
-    fn validate_provisioning_sources_requires_exactly_one_psid() {
-        // Exactly one PSID entry is accepted.
-        let one = DpfDeploymentsConfig {
-            bf3: DpfDeploymentConfig::default(),
-            bf4_generic: Some(bf4_config(None, Some(bf4_with_psids(&["MT_0000000884"])))),
-            bf4_astra: None,
-        };
-        assert!(one.validate_provisioning_sources().is_ok());
-
-        // More than one PSID is rejected (multi-PSID support is pending a DPF change).
+    fn validate_provisioning_sources_accepts_multiple_psids() {
         let many = DpfDeploymentsConfig {
             bf3: DpfDeploymentConfig::default(),
             bf4_generic: Some(bf4_config(
@@ -8115,6 +8098,6 @@ helm_repo_url = "oci://registry.example.test/doca"
             )),
             bf4_astra: None,
         };
-        assert!(many.validate_provisioning_sources().is_err());
+        assert!(many.validate_provisioning_sources().is_ok());
     }
 }
