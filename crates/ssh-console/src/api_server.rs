@@ -582,7 +582,7 @@ fn load_tls_acceptor(config: &Config) -> Result<TlsAcceptor, std::io::Error> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
-    #[error("could not read TLS material: {0}")]
+    #[error("error spawning API server: {0}")]
     Io(#[from] std::io::Error),
 }
 
