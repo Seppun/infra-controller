@@ -41,7 +41,7 @@ all subscribers without a client handle extending its lifetime. `BmcConnectionSt
 this client. This keeps streaming attached to the per-machine BMC client across BMC disconnect/reconnect cycles; it does
 not subscribe directly to raw SSH chunks or duplicate line assembly in the API service.
 
-## Seamless history-to-live handoff
+## Gapless History-to-Live Handoff
 
 For each request, the ssh-console service performs this protocol:
 
