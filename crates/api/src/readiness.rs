@@ -102,10 +102,27 @@ async fn run_database_readiness_probe(
     }
 }
 
-/// One PostgreSQL readiness check: a trivial query bounded by `timeout`.
+/// One PostgreSQL readiness check, bounded by `timeout`: the connection must
+/// answer, and must not be read-only. A reachable-but-read-only connection
+/// happens when the configured endpoint routes to a standby -- e.g. a failed
+/// promotion or stale primary routing -- and `SELECT 1` alone would not catch
+/// it, even though Core's write paths fail against it. Mirrors the same
+/// `transaction_read_only` check `ensure_work_lock_connection_is_writable`
+/// (`crates/api-db/src/work_lock_manager.rs`) uses to reject read-only pool
+/// connections.
 async fn check_database_readiness(db_pool: &PgPool, timeout: Duration) -> bool {
-    match tokio::time::timeout(timeout, sqlx::query("SELECT 1").execute(db_pool)).await {
-        Ok(Ok(_)) => true,
+    let check =
+        sqlx::query_scalar::<_, bool>("SELECT current_setting('transaction_read_only')::bool")
+            .fetch_one(db_pool);
+    match tokio::time::timeout(timeout, check).await {
+        Ok(Ok(read_only)) => {
+            if read_only {
+                emit(DatabaseReadinessCheckFailed {
+                    error: "connection is read-only".to_string(),
+                });
+            }
+            !read_only
+        }
         Ok(Err(error)) => {
             emit(DatabaseReadinessCheckFailed {
                 error: error.to_string(),
