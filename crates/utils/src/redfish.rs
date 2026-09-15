@@ -98,14 +98,11 @@ pub fn redact_redfish_response_body<'a>(
 
 /// Detects response bodies that should have been JSON objects or arrays.
 ///
-/// `serde_json` rejects a leading UTF-8 BOM, so remove one optional BOM before
-/// deciding whether a parse failure must fail closed.
+/// `serde_json` rejects leading UTF-8 BOMs, so remove any leading BOMs and
+/// whitespace before deciding whether a parse failure must fail closed.
 fn starts_with_json_container(response_body: &str) -> bool {
-    let response_body = response_body.trim_start();
     let response_body = response_body
-        .strip_prefix('\u{feff}')
-        .unwrap_or(response_body)
-        .trim_start();
+        .trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
     response_body
         .as_bytes()
         .first()
@@ -378,35 +375,49 @@ fn truncate_redfish_error_message(mut message: String) -> String {
     message
 }
 
-/// Masks the union of all sensitive-value matches, including overlapping ones.
+/// Masks the union of all sensitive-value matches, including overlapping ones,
+/// without retaining a range for every occurrence.
 fn mask_all<'a>(text: &str, sensitive_values: impl IntoIterator<Item = &'a str>) -> String {
-    let mut ranges: Vec<(usize, usize)> = sensitive_values
+    let sensitive_values = sensitive_values
         .into_iter()
         .filter(|value| !value.is_empty())
-        .flat_map(|value| {
-            let value = value.as_bytes();
-            (0..=text.len().saturating_sub(value.len()))
-                .filter(move |&start| text.as_bytes()[start..].starts_with(value))
-                .map(move |start| (start, start + value.len()))
-        })
-        .collect();
-    ranges.sort_unstable();
+        .map(str::as_bytes)
+        .collect::<Vec<_>>();
+    let text_bytes = text.as_bytes();
 
     let mut redacted = String::with_capacity(text.len());
-    let mut cursor = 0;
-    let mut index = 0;
-    while index < ranges.len() {
-        let (start, mut end) = ranges[index];
-        index += 1;
-        while index < ranges.len() && ranges[index].0 <= end {
-            end = end.max(ranges[index].1);
-            index += 1;
+    let mut copied_until = 0;
+    let mut active_range: Option<(usize, usize)> = None;
+    for start in 0..text_bytes.len() {
+        let Some(end) = sensitive_values
+            .iter()
+            .filter(|value| text_bytes[start..].starts_with(value))
+            .map(|value| start + value.len())
+            .max()
+        else {
+            continue;
+        };
+
+        match active_range {
+            Some((range_start, range_end)) if start <= range_end => {
+                active_range = Some((range_start, range_end.max(end)));
+            }
+            Some((range_start, range_end)) => {
+                redacted.push_str(&text[copied_until..range_start]);
+                redacted.push_str(REDACTED);
+                copied_until = range_end;
+                active_range = Some((start, end));
+            }
+            None => active_range = Some((start, end)),
         }
-        redacted.push_str(&text[cursor..start]);
-        redacted.push_str(REDACTED);
-        cursor = end;
     }
-    redacted.push_str(&text[cursor..]);
+
+    if let Some((start, end)) = active_range {
+        redacted.push_str(&text[copied_until..start]);
+        redacted.push_str(REDACTED);
+        copied_until = end;
+    }
+    redacted.push_str(&text[copied_until..]);
     redacted
 }
 
@@ -660,6 +671,11 @@ mod tests {
                 Check {
                     scenario: "UTF-8 BOM before escaped credential",
                     input: "\u{feff}{\"credential\":\"s\\u0065cret\"}".to_string(),
+                    expect: UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string(),
+                },
+                Check {
+                    scenario: "repeated UTF-8 BOMs before escaped credential",
+                    input: "\u{feff} \u{feff}\n{\"credential\":\"s\\u0065cret\"}".to_string(),
                     expect: UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string(),
                 },
             ],

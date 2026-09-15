@@ -35,7 +35,7 @@ use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
 use carbide_utils::HostPortPair;
 use carbide_utils::redfish::redact_redfish_response_body;
 use forge_tls::client_config::ClientCert;
-use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
+use http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
@@ -892,7 +892,7 @@ async fn send_upstream(
     .await
     .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
 
-    prepare_upstream_headers(&parts.headers, &mut bmc_client_info.header_map);
+    copy_request_headers(&parts.headers, &mut bmc_client_info.header_map);
 
     let mut upstream_uri_parts = bmc_client_info.base_upstream_uri.into_parts();
     upstream_uri_parts.path_and_query = Some(path_and_query);
@@ -952,9 +952,9 @@ async fn prepare_response_body(
     if !status.is_client_error() && !status.is_server_error() {
         return PreparedResponseBody::Unchanged(body);
     }
-    // A compliant BMC answers the explicit `Accept-Encoding: identity`
-    // request without a content coding. If it does not, omit the error instead
-    // of searching encoded bytes and potentially forwarding a hidden secret.
+    // Automatic decompression is disabled on the upstream client. If the caller
+    // negotiated a content coding, omit an encoded error instead of searching
+    // encoded bytes and potentially forwarding a hidden secret.
     if has_non_identity_content_encoding(headers) {
         return PreparedResponseBody::Replaced(Body::from(OMITTED_BMC_ERROR_RESPONSE));
     }
@@ -1163,24 +1163,12 @@ fn copy_request_headers(source: &HeaderMap, dest: &mut HeaderMap) {
             || *name == axum::http::header::AUTHORIZATION
             || name.as_str().eq_ignore_ascii_case(REDFISH_AUTH_TOKEN_HEADER)
             || name.as_str().eq_ignore_ascii_case("forwarded")
-            || *name == axum::http::header::ACCEPT_ENCODING
             || *name == axum::http::header::CONTENT_LENGTH
         {
             continue;
         }
         dest.append(name.clone(), value.clone());
     }
-}
-
-fn prepare_upstream_headers(source: &HeaderMap, dest: &mut HeaderMap) {
-    copy_request_headers(source, dest);
-    // Error responses are inspected for credential echoes before they leave
-    // the proxy. Ask the BMC for an identity representation so that inspection
-    // sees the same representation the caller will consume.
-    dest.insert(
-        http::header::ACCEPT_ENCODING,
-        HeaderValue::from_static("identity"),
-    );
 }
 
 fn method_supports_body(method: &Method) -> bool {
@@ -1517,8 +1505,7 @@ mod tests {
         build_authority, build_http_client, build_response, copy_request_headers, create_client,
         evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
         ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
-        parse_forwarded_host_value, prepare_response_body, prepare_upstream_headers,
-        request_principal_ids, span_status,
+        parse_forwarded_host_value, prepare_response_body, request_principal_ids, span_status,
     };
 
     const TEST_CONFIG: &str = r#"
@@ -2132,11 +2119,8 @@ mod tests {
                 HeaderCopyCase::Forwarded => vec![],
             }
 
-            // The proxy must inspect final BMC error bytes for credential
-            // echoes, so the upstream request supplies its own identity-only
-            // response-encoding preference.
-            "accept encoding filtered" {
-                HeaderCopyCase::AcceptEncoding => vec![],
+            "accept encoding copied" {
+                HeaderCopyCase::AcceptEncoding => vec!["accept-encoding".to_string()],
             }
 
             "content length filtered" {
@@ -2162,19 +2146,19 @@ mod tests {
     }
 
     #[test]
-    fn upstream_requests_force_identity_response_encoding() {
+    fn upstream_requests_preserve_the_callers_response_encoding_preference() {
         let mut source = HeaderMap::new();
         source.insert(
             axum::http::header::ACCEPT_ENCODING,
-            HeaderValue::from_static("gzip, br"),
+            HeaderValue::from_static("gzip, identity;q=0"),
         );
         let mut dest = HeaderMap::new();
 
-        prepare_upstream_headers(&source, &mut dest);
+        copy_request_headers(&source, &mut dest);
 
         assert_eq!(
             dest.get(axum::http::header::ACCEPT_ENCODING),
-            Some(&HeaderValue::from_static("identity"))
+            Some(&HeaderValue::from_static("gzip, identity;q=0"))
         );
     }
 
@@ -2993,6 +2977,31 @@ mod tests {
             body,
             Bytes::from_static(OMITTED_BMC_ERROR_RESPONSE.as_bytes())
         );
+    }
+
+    #[tokio::test]
+    async fn encoded_success_response_remains_unchanged() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        let prepared = prepare_response_body(
+            reqwest::StatusCode::OK,
+            &headers,
+            Body::from("opaque encoded bytes"),
+            Some("secret"),
+        )
+        .await;
+        assert!(matches!(&prepared, PreparedResponseBody::Unchanged(_)));
+
+        let response = build_response(reqwest::StatusCode::OK, &headers, prepared);
+        assert_eq!(
+            response.headers().get(reqwest::header::CONTENT_ENCODING),
+            Some(&HeaderValue::from_static("gzip"))
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, Bytes::from_static(b"opaque encoded bytes"));
     }
 
     const TLS_FAILURE_METRIC: &str = "carbide_bmc_proxy_tls_connection_fail_total";
