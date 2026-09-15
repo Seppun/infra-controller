@@ -40,7 +40,8 @@ The following tools must be installed on the build machine:
 | `curl`, `jq` | Download HBN config bundle from NGC |
 | `xxd` | Decode NGC's base64 SHA256 hashes for verification |
 | `zip`, `gzip` | Package artifacts |
-| `sha256sum` / `shasum` | Verify downloaded files |
+| `sha256sum` / `shasum` | Verify downloaded files; `shasum` also writes the manifest for `--encrypt-artifacts` |
+| `openssl` | Only with `--encrypt-artifacts`: encrypt `servers/`. Ships with Ubuntu (OpenSSL) and macOS (LibreSSL); no install needed |
 | `mkisofs` (Linux) or `xorrisofs` (macOS) | Build ISO |
 
 Install on Ubuntu:
@@ -58,8 +59,12 @@ sudo apt-get install wget curl jq zip gzip genisoimage
 
 Install on macOS:
 ```bash
-brew install yq gomplate wget curl jq zip xorriso
+brew install bash yq gomplate wget curl jq zip xorriso
 ```
+
+The build script needs bash 4 or newer (it uses associative arrays); macOS ships bash 3.2 as
+`/bin/bash`. Either put Homebrew's bash first on your `PATH` or invoke the script through it:
+`/opt/homebrew/bin/bash ./build-dpu-install-iso.sh ...`.
 
 ---
 
@@ -75,6 +80,24 @@ Optional: the entire `fnn` block (only needed for FNN/SMN networking mode). When
 `fnn.controlPlaneVni`, `fnn.commonManagedNodeBmcRouteTarget`, `fnn.commonSiteControllerRouteTarget`,
 and `fnn.commonAdminNetworkTarget` are required; `fnn.vpcVrfLoopbackPrefix` and
 `fnn.routeTargetsToImport` are optional.
+
+Optional: `installWithLeafPassword: true` — for datacenters that enforce BGP TCP MD5
+authentication on DPU-facing ToR ports. The build asks for the leaf BGP password (or reads
+`BGP_LEAF_SESSION_PASSWORD`), renders it as the `password` of the two leaf-facing sessions
+(`p0_if`/`p1_if`, both templates) in every `startup.yaml`, and requires `--encrypt-artifacts`
+(below) so the rendered configs never sit in the ISO in plaintext. The password is never
+written to the site file; nothing is asked at install time beyond the artifact passphrase.
+Managed-host DPUs take theirs from `bgp_leaf_session_password` in the nico-api site config;
+the two must match when the same ToRs serve both. Maximum 80 characters.
+
+**Encrypted artifacts (`--encrypt-artifacts`).** `servers/` is packed and encrypted as
+`servers.tar.enc` (AES-256-CBC, PBKDF2, with a SHA-256 manifest inside) using the passphrase
+from `DPU_ISO_ARTIFACT_PASSWORD` or a prompt, and the plaintext copies are removed from the
+ISO, the ZIP and the output directory. `install.sh` then asks for that passphrase once,
+decrypts into the root-only working directory and verifies the manifest; a wrong passphrase
+or a damaged ISO stops the install before anything is copied. Required when
+`installWithLeafPassword` is true; usable on its own otherwise. The artifact passphrase and
+the leaf BGP password are independent and may be the same or different.
 
 ```yaml
 # yaml-language-server: $schema=
@@ -225,6 +248,9 @@ Run these steps **on each site controller host** via its BMC remote console.
   been validated.
 - Access: BMC remote console (IPMI/iDRAC/iLO)
 - The host has **no network connectivity** at this stage — that is expected
+- For an ISO built with `--encrypt-artifacts`: `openssl` and `shasum`, both present on a
+  standard Ubuntu 24.04 install (`openssl` and `perl` packages); `install.sh` checks for
+  them before asking for the passphrase
 - `libc6` must be installed — it is a dependency of `libfuse2t64`, which in turn is
   required by `rshim`. A clean Ubuntu 24.04 install includes `libc6` by default.
 
