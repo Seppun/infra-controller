@@ -84,3 +84,14 @@ tests:
               image: registry.example.com/custom-init:original
             - name: empty-repository
               image: registry.example.com/custom-init:original
+
+  - it: should reject a repository-only entry without a fallback image
+    set:
+      initContainers:
+        - name: valid-init
+          image: registry.example.com/custom-init:original
+        - name: missing-tag
+          repository: registry.example.com/custom-init
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api.initContainers[1] requires either non-empty repository and tag or a non-empty image"
