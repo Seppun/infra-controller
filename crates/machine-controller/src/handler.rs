@@ -46,7 +46,6 @@ use config_version::{ConfigVersion, Versioned};
 use db::ConditionalWrite::{Applied, NotApplied};
 use db::db_read::PgPoolReader;
 use db::explored_endpoints::EndpointReportNotCurrent;
-use db::machine_desired_boot_interface::BootInterfaceObservationNotApplicable;
 use db::{ConditionalWrite, DatabaseError};
 use eyre::eyre;
 use futures::TryFutureExt;
@@ -7213,7 +7212,13 @@ async fn handle_ready_boot_config(
             .await?;
             let next_state = match verification {
                 ConditionalWrite::Applied(()) => ManagedHostState::Ready,
-                ConditionalWrite::NotApplied(BootInterfaceObservationNotApplicable) => {
+                ConditionalWrite::NotApplied(reason) => {
+                    tracing::debug!(
+                        machine_id = %mh_snapshot.host_snapshot.id,
+                        desired_version = %desired.version,
+                        ?reason,
+                        "Discarded Ready boot configuration observation",
+                    );
                     let current_desired = db::machine_desired_boot_interface::get(
                         txn.as_mut(),
                         &mh_snapshot.host_snapshot.id,
@@ -7394,11 +7399,12 @@ async fn complete_host_init_lockdown(
         Utc::now(),
     )
     .await?;
-    if let ConditionalWrite::NotApplied(BootInterfaceObservationNotApplicable) = verification {
+    if let ConditionalWrite::NotApplied(reason) = verification {
         tracing::info!(
             machine_id = %mh_snapshot.host_snapshot.id,
             desired_version = %desired.version,
-            "Desired boot interface changed during HostInit verification; leaving it pending",
+            ?reason,
+            "Discarded HostInit boot configuration observation",
         );
     }
     Ok(outcome.with_txn(txn))
@@ -9130,18 +9136,18 @@ impl StateHandler for InstanceStateHandler {
                     let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
                     let old_use_admin_network = host_netconf.use_admin_network;
                     host_netconf.use_admin_network = Some(true);
-                    let updated = db::machine::try_update_network_config(
+                    db::machine::try_update_network_config(
                         &mut txn,
                         &mh_snapshot.host_snapshot.id,
                         host_version,
                         &host_netconf,
                     )
-                    .await?;
+                    .await?
+                    .check_applied()?;
 
                     // Set use_admin_network_changed if we want to reboot
                     // ovs on admin network change.
-                    if updated
-                        && old_use_admin_network != host_netconf.use_admin_network
+                    if old_use_admin_network != host_netconf.use_admin_network
                         && ctx
                             .services
                             .site_config
@@ -9480,18 +9486,18 @@ impl StateHandler for InstanceStateHandler {
                     let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
                     let old_use_admin_network = host_netconf.use_admin_network;
                     host_netconf.use_admin_network = Some(false);
-                    let updated = db::machine::try_update_network_config(
+                    db::machine::try_update_network_config(
                         &mut txn,
                         &mh_snapshot.host_snapshot.id,
                         host_version,
                         &host_netconf,
                     )
-                    .await?;
+                    .await?
+                    .check_applied()?;
 
                     // Set use_admin_network_changed if we want to reboot
                     // ovs on admin network change.
-                    if updated
-                        && old_use_admin_network != host_netconf.use_admin_network
+                    if old_use_admin_network != host_netconf.use_admin_network
                         && ctx
                             .services
                             .site_config

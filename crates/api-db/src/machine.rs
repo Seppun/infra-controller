@@ -70,7 +70,7 @@ use sqlx::{FromRow, PgConnection, Pool, Postgres, Row};
 
 use super::{DatabaseError, ObjectFilter, Transaction, queries};
 use crate::db_read::DbReader;
-use crate::{ConditionalWrite, DatabaseResult};
+use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseResult};
 
 #[derive(Serialize)]
 struct ReprovisionRequestRestart {
@@ -1513,6 +1513,12 @@ pub async fn force_cleanup(
     Ok(())
 }
 
+/// `MachineNetworkConfigNotCurrent` means the target is missing or its network
+/// version no longer matches. The guarded backfill also rejects force deletion;
+/// the write deliberately does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineNetworkConfigNotCurrent;
+
 /// Updates the `network_config` on the target machine row (host or
 /// DPU), and bumps the `network_config_version` on *every* machine
 /// row in the same "machine group" (host + every DPU attached to it)
@@ -1522,12 +1528,16 @@ pub async fn force_cleanup(
 /// computed by the `machine_group_member_ids` Postgres function, which
 /// walks `machine_interfaces`. For zero-DPU hosts, the group is just the
 /// target itself.
+///
+/// Returns `NotApplied(MachineNetworkConfigNotCurrent)` for a missing target or
+/// changed version. Database failures remain errors. The caller must commit
+/// both the target write and group version updates in the same transaction.
 pub async fn try_update_network_config(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     try_update_network_config_inner(txn, machine_id, expected_version, new_state, false).await
 }
 
@@ -1536,7 +1546,7 @@ async fn try_update_network_config_unless_force_deleting(
     machine_id: &MachineId,
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     try_update_network_config_inner(txn, machine_id, expected_version, new_state, true).await
 }
 
@@ -1560,7 +1570,7 @@ async fn try_update_network_config_inner(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
     reject_force_deletion: bool,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     let next_version = expected_version.increment();
 
     // First, do our usual "optimistic" lock update on the target row, which
@@ -1598,9 +1608,11 @@ async fn try_update_network_config_inner(
                 .execute(&mut *txn)
                 .await
                 .map_err(|e| DatabaseError::query(group_query, e))?;
-            Ok(true)
+            Ok(ConditionalWrite::Applied(()))
         }
-        Err(sqlx::Error::RowNotFound) => Ok(false),
+        Err(sqlx::Error::RowNotFound) => {
+            Ok(ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent))
+        }
         Err(e) => Err(DatabaseError::query(target_query, e)),
     }
 }
@@ -2377,6 +2389,62 @@ where
         .into_iter()
         .map(ID::try_from)
         .collect::<Result<Vec<ID>, _>>()?)
+}
+
+/// `try_update_controller_state` updates a host and its attached DPUs only if
+/// the host's controller-state version still matches `expected_version`.
+///
+/// The caller supplies `new_version` for every machine and its history entry.
+/// `NotApplied(ControllerStateNotCurrent)` means the host is missing or its
+/// version changed; no state or history changes remain. Successful writes return
+/// `Applied(())` and remain in the caller's transaction. Database failures remain
+/// errors.
+pub async fn try_update_controller_state(
+    txn: &mut PgConnection,
+    host_id: &HostMachineId,
+    expected_version: ConfigVersion,
+    new_version: ConfigVersion,
+    new_state: &ManagedHostState,
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+
+    // `advance` takes the history retention lock before the machine row lock.
+    // Reversing that order can deadlock. Roll back the history if the host
+    // version changed.
+    crate::state_history::persist(
+        inner_txn.as_pgconn(),
+        crate::state_history::StateHistoryTableId::Machine,
+        host_id,
+        new_state,
+        new_version,
+    )
+    .await?;
+
+    let query = r#"
+        UPDATE machines
+        SET controller_state_version = $1, controller_state = $2
+        WHERE id = $3 AND controller_state_version = $4
+        RETURNING id
+    "#;
+    let updated: Option<HostMachineId> = sqlx::query_scalar(query)
+        .bind(new_version)
+        .bind(sqlx::types::Json(new_state))
+        .bind(host_id)
+        .bind(expected_version)
+        .fetch_optional(inner_txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if updated.is_none() {
+        inner_txn.rollback().await?;
+        return Ok(ConditionalWrite::NotApplied(ControllerStateNotCurrent));
+    }
+
+    tracing::info!(machine_id = %host_id, next_state = ?new_state, "Updating host state");
+    for dpu in find_dpus_by_host_machine_id(inner_txn.as_pgconn(), host_id).await? {
+        advance(&dpu, inner_txn.as_pgconn(), new_state, Some(new_version)).await?;
+    }
+    inner_txn.commit().await?;
+    Ok(ConditionalWrite::Applied(()))
 }
 
 pub async fn update_state(
@@ -3161,7 +3229,7 @@ pub async fn update_dpu_loopback_ips_v6(
             })?;
             network_config.loopback_ip_v6 = Some(loopback_ip_v6);
 
-            if try_update_network_config_unless_force_deleting(
+            match try_update_network_config_unless_force_deleting(
                 txn.as_pgconn(),
                 &dpu_machine_id,
                 network_config_version,
@@ -3169,9 +3237,12 @@ pub async fn update_dpu_loopback_ips_v6(
             )
             .await?
             {
-                txn.commit().await?;
-                last_conflicting_version = None;
-                break;
+                ConditionalWrite::Applied(()) => {
+                    txn.commit().await?;
+                    last_conflicting_version = None;
+                    break;
+                }
+                ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) => {}
             }
 
             let force_deleting_or_deleted =
@@ -3373,6 +3444,9 @@ pub async fn get_quarantine_state(
     Ok(network_config.value.quarantine_state)
 }
 
+/// Sets quarantine and returns the previous state only after the conditional
+/// write applies. Returns an error if the network configuration is missing or
+/// changes before the write.
 pub async fn set_quarantine_state(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
@@ -3382,10 +3456,21 @@ pub async fn set_quarantine_state(
         get_network_config(&mut *txn, machine_id).await?.take();
     let old_quarantine_state = network_config.quarantine_state.clone();
     network_config.quarantine_state = Some(quarantine_state);
-    try_update_network_config(txn, machine_id, network_config_version, &network_config).await?;
-    Ok(old_quarantine_state)
+    match try_update_network_config(txn, machine_id, network_config_version, &network_config)
+        .await?
+    {
+        ConditionalWrite::Applied(()) => Ok(old_quarantine_state),
+        ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) => {
+            Err(DatabaseError::FailedPrecondition(format!(
+                "network configuration for machine {machine_id} changed or is no longer available"
+            )))
+        }
+    }
 }
 
+/// Clears quarantine and returns the previous state only after the conditional
+/// write applies. Returns an error if the network configuration is missing or
+/// changes before the write.
 pub async fn clear_quarantine_state(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -3394,8 +3479,16 @@ pub async fn clear_quarantine_state(
         get_network_config(&mut *txn, machine_id).await?.take();
     let old_quarantine_state = network_config.quarantine_state.clone();
     network_config.quarantine_state = None;
-    try_update_network_config(txn, machine_id, network_config_version, &network_config).await?;
-    Ok(old_quarantine_state)
+    match try_update_network_config(txn, machine_id, network_config_version, &network_config)
+        .await?
+    {
+        ConditionalWrite::Applied(()) => Ok(old_quarantine_state),
+        ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) => {
+            Err(DatabaseError::FailedPrecondition(format!(
+                "network configuration for machine {machine_id} changed or is no longer available"
+            )))
+        }
+    }
 }
 
 pub async fn modify_dpf_state(
@@ -3784,6 +3877,112 @@ mod test {
             "both dpa_interfaces rows should cascade to the stable id",
         );
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn controller_state_persistence_preserves_advance_lock_order(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        let host_id = HostMachineId::try_from(machine_id)?;
+        let mut setup_txn = pool.begin().await?;
+        super::create(
+            setup_txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        setup_txn.commit().await?;
+
+        let mut legacy_txn = pool.begin().await?;
+        let machine = super::find_one(
+            legacy_txn.as_mut(),
+            &host_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("fixture host");
+        let expected_version = machine.state.version;
+        let new_version = expected_version.increment();
+        let legacy_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(legacy_txn.as_mut())
+            .await?;
+
+        // Pause the legacy writer at the retention lock taken by `advance`.
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(\
+                hashtextextended($1, 'machine_state_history'::regclass::bigint)\
+            )",
+        )
+        .bind(host_id.to_string())
+        .execute(legacy_txn.as_mut())
+        .await?;
+
+        let mut controller_txn = pool.begin().await?;
+        let controller_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(controller_txn.as_mut())
+            .await?;
+        let controller_write = async {
+            let applied = super::try_update_controller_state(
+                controller_txn.as_mut(),
+                &host_id,
+                expected_version,
+                new_version,
+                &ManagedHostState::Ready,
+            )
+            .await?;
+            controller_txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(applied)
+        };
+        let legacy_write = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM pg_locks
+                        WHERE pid = $1 AND locktype = 'advisory' AND NOT granted
+                          AND $2 = ANY(pg_blocking_pids(pid))
+                    )",
+                )
+                .bind(controller_pid)
+                .bind(legacy_pid)
+                .fetch_one(&pool)
+                .await?;
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+
+            // Waiting for history must not hold the host row. NOWAIT catches
+            // the reversed order without relying on a deadlock victim.
+            sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+                .bind(host_id)
+                .fetch_one(legacy_txn.as_mut())
+                .await?;
+            super::advance(
+                &machine,
+                legacy_txn.as_mut(),
+                &ManagedHostState::ForceDeletion,
+                Some(new_version),
+            )
+            .await?;
+            legacy_txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (applied, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::try_join!(controller_write, legacy_write)
+        })
+        .await??;
+        assert_eq!(
+            applied,
+            crate::ConditionalWrite::NotApplied(crate::ControllerStateNotCurrent),
+            "the controller must reject the earlier snapshot"
+        );
         Ok(())
     }
 
@@ -4580,14 +4779,15 @@ mod test {
                 .await?
                 .take();
         network_config.use_admin_network = Some(false);
-        assert!(
+        assert_eq!(
             super::try_update_network_config(
                 txn.as_mut(),
                 &dpu_machine_id,
                 version,
                 &network_config,
             )
-            .await?
+            .await?,
+            crate::ConditionalWrite::Applied(())
         );
         txn.commit().await?;
         reservation_lock.commit().await?;
