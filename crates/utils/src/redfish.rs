@@ -53,8 +53,9 @@ pub fn log_redfish_http_error<'a>(
 ///
 /// Valid JSON is decoded before masking its string values, object keys, and
 /// matching non-string scalar values, so escaped or unquoted forms of a
-/// credential cannot bypass redaction. Non-JSON responses retain their original
-/// formatting and receive best-effort literal masking.
+/// credential cannot bypass redaction. JSON containers that cannot be parsed
+/// safely are replaced rather than forwarded, while ordinary non-JSON responses
+/// retain their original formatting and receive best-effort literal masking.
 pub fn redact_redfish_response_body<'a>(
     response_body: &str,
     sensitive_values: impl IntoIterator<Item = &'a str>,
@@ -67,8 +68,18 @@ pub fn redact_redfish_response_body<'a>(
         return response_body.to_string();
     }
 
-    let Ok(mut response) = serde_json::from_str::<serde_json::Value>(response_body) else {
-        return mask_all(response_body, sensitive_values);
+    let mut response = match serde_json::from_str::<serde_json::Value>(response_body) {
+        Ok(response) => response,
+        Err(_)
+            if response_body
+                .trim_start()
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| matches!(*byte, b'{' | b'[')) =>
+        {
+            return UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string();
+        }
+        Err(_) => return mask_all(response_body, sensitive_values),
     };
     let sensitive_scalars = sensitive_values
         .iter()
@@ -597,6 +608,17 @@ mod tests {
             redact_redfish_response_body("credential secret rejected", ["secret"]),
             "credential REDACTED rejected"
         );
+    }
+
+    #[test]
+    fn redfish_response_body_redaction_fails_closed_above_the_json_depth_limit() {
+        let response = format!("{}\"s\\u0065cret\"{}", "[".repeat(128), "]".repeat(128));
+
+        let redacted = redact_redfish_response_body(&response, ["secret"]);
+
+        assert_eq!(redacted, UNRECOGNIZED_REDFISH_ERROR_RESPONSE);
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains(r"s\u0065cret"));
     }
 
     #[test]
