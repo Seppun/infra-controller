@@ -125,17 +125,17 @@ impl LldpReporter {
     }
 }
 
-/// Collect this host's LLDP neighbors and report them to nico-api, re-sending
-/// only when the snapshot changed since the last successful report.
+/// Report one completed LLDP collection to nico-api, re-sending only when the
+/// snapshot changed since the last successful report.
 ///
 /// A failed collection is reported too, so nico-api can tell a host whose
 /// `lldpcli` has stopped answering from one whose topology is simply stable.
-pub(crate) async fn report_lldp_neighbors(reporter: &mut LldpReporter) {
-    let collected = carbide_host_support::lldp_collector::collect_lldp_neighbors().await;
-    if let Err(error) = &collected {
-        tracing::warn!(%error, "Could not collect LLDP neighbors");
-    }
-
+/// The collection itself is made by the collector task, which also logs the
+/// failure.
+pub(crate) async fn report_lldp_neighbors(
+    reporter: &mut LldpReporter,
+    collected: LldpCollectorResult<Vec<LldpNeighbor>>,
+) {
     match reporter.report(collected).await {
         Ok(ReportOutcome::Sent) => tracing::info!("Reported LLDP neighbors"),
         Ok(ReportOutcome::UnchangedSkipped) => {

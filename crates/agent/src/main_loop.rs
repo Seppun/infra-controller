@@ -42,7 +42,8 @@ use mac_address::MacAddress;
 use prost::Message as _;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 use version_compare::Version;
 
@@ -391,6 +392,39 @@ pub(super) async fn setup_and_run(
         .as_ref()
         .map(|prefix| InterfaceTranslationMode::Prepend(prefix.clone()));
 
+    // Spawn any further background task into this set and give it a clone of
+    // this token, so one cancel and one join below shut them all down.
+    let mut background_tasks = JoinSet::new();
+    let cancel_token = CancellationToken::new();
+
+    let lldp_platform_type = options.agent_platform_type.clone();
+    let latest_lldp = carbide_host_support::lldp_collector_task::start_lldp_collector(
+        move || {
+            // The clone must happen here, outside the future, so the future
+            // owns it. An `async move ||` closure would borrow it from the
+            // closure instead, and a lending future implements only
+            // `AsyncFnMut`, whose future cannot be bounded `Send` on stable.
+            let platform_type = lldp_platform_type.clone();
+            async move {
+                let collected = crate::collect_lldp_neighbors(&platform_type).await;
+                // Emitted here rather than where the collection is reported, so
+                // the metric keeps counting collection attempts rather than the
+                // status loop's reads of them.
+                match &collected {
+                    Ok(_) => LldpCollection::Succeeded.emit(),
+                    Err(error) => LldpCollection::Failed {
+                        error: error.to_string(),
+                    }
+                    .emit(),
+                }
+                collected
+            }
+        },
+        LLDP_COLLECTION_INTERVAL,
+        &mut background_tasks,
+        cancel_token.clone(),
+    );
+
     let mut main_loop = MainLoop {
         forge_client_config,
         build_version,
@@ -409,6 +443,7 @@ pub(super) async fn setup_and_run(
         started_at: std::time::Instant::now(),
         inventory_updater_config,
         lldp_cache: LldpSnapshotCache::new(),
+        latest_lldp,
         options,
         agent_config,
         forge_api_server,
@@ -426,7 +461,10 @@ pub(super) async fn setup_and_run(
         ovs_restart_retry_backoff: None,
     };
 
-    main_loop.run().await
+    let outcome = main_loop.run().await;
+    cancel_token.cancel();
+    background_tasks.join_all().await;
+    outcome
 }
 
 struct MainLoop {
@@ -448,6 +486,7 @@ struct MainLoop {
     ca_republish_time: std::time::Instant,
     inventory_updater_config: MachineInventoryUpdaterConfig,
     lldp_cache: LldpSnapshotCache,
+    latest_lldp: carbide_host_support::lldp_collector_task::LatestLldpCollection,
     options: command_line::RunOptions,
     agent_config: AgentConfig,
     forge_api_server: String,
@@ -1266,17 +1305,14 @@ impl MainLoop {
                 current_extension_service_version =
                     status_out.dpu_extension_service_version.clone();
 
-                let collected =
-                    crate::collect_lldp_neighbors(&self.options.agent_platform_type).await;
-                match &collected {
-                    Ok(_) => LldpCollection::Succeeded.emit(),
-                    Err(error) => LldpCollection::Failed {
-                        error: error.to_string(),
-                    }
-                    .emit(),
-                }
-                let lldp = self.lldp_cache.classify(collected);
-                status_out.lldp = Some(lldp.clone());
+                // Absent until the collector task finishes its first attempt.
+                // The status push still happens; it just carries no LLDP, which
+                // is a legal wire state and is what an unobserved topology is.
+                let lldp = self
+                    .latest_lldp
+                    .latest()
+                    .map(|collected| self.lldp_cache.classify(collected));
+                status_out.lldp = lldp.clone();
 
                 if record_network_status(
                     status_out,
@@ -1285,6 +1321,7 @@ impl MainLoop {
                 )
                 .await
                 .is_ok()
+                    && let Some(lldp) = lldp
                 {
                     // The cache advances only once nico-api has the report
                     self.lldp_cache.confirm_reported(lldp);
@@ -1698,6 +1735,7 @@ async fn get_fabric_interfaces_data()
     Ok(fabric_interface_data)
 }
 
+const LLDP_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
 const ONE_SECOND: Duration = Duration::from_secs(1);
 const OVS_RESTART_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 
