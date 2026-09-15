@@ -88,14 +88,15 @@ authentication on DPU-facing ToR ports. The build asks for the leaf BGP password
 (below) so the rendered configs never sit in the ISO in plaintext. The password is never
 written to the site file; nothing is asked at install time beyond the artifact passphrase.
 Managed-host DPUs take theirs from `bgp_leaf_session_password` in the nico-api site config;
-the two must match when the same ToRs serve both. Maximum 80 characters.
+the two must match when the same ToRs serve both. Maximum 80 bytes, the TCP MD5 key limit.
 
 **Encrypted artifacts (`--encrypt-artifacts`).** `servers/` is packed and encrypted as
 `servers.tar.enc` (AES-256-CBC, PBKDF2, with a SHA-256 manifest inside) using the passphrase
 from `DPU_ISO_ARTIFACT_PASSWORD` or a prompt, and the plaintext copies are removed from the
 ISO, the ZIP and the output directory. `install.sh` then asks for that passphrase once,
-decrypts into the root-only working directory and verifies the manifest; a wrong passphrase
-or a damaged ISO stops the install before anything is copied. Required when
+decrypts and verifies the manifest first, before any package is installed or file copied;
+a wrong passphrase or a damaged ISO stops the install with nothing changed, and on a
+re-install the previous per-node configs stay in place until the new ones are verified. Required when
 `installWithLeafPassword` is true; usable on its own otherwise. The artifact passphrase and
 the leaf BGP password are independent and may be the same or different.
 
@@ -235,6 +236,10 @@ dpu_install_3.2.2_3.2.2.iso
         └── 99_config.yaml
 ```
 
+Built with `--encrypt-artifacts`, the ISO has no `servers/` directory; in its place is
+`servers.tar.enc`, the same tree encrypted with a `SHA256SUMS` manifest inside, which
+`install.sh` decrypts after asking for the passphrase.
+
 ---
 
 ## Part 2 — Provision the site controller
@@ -301,6 +306,7 @@ Verify the mount:
 ```bash
 ls /mnt/dpu-install
 # Expected: install.sh  post-power-cycle.sh  servers/  ...
+# Encrypted ISO (--encrypt-artifacts): install.sh  post-power-cycle.sh  servers.tar.enc  ...  (no servers/)
 ```
 
 ---
@@ -406,7 +412,8 @@ Repeat **Part 2** (Steps 1–6) for each site controller host, substituting its 
 ```
 
 The same ISO is used for all nodes — each `--server-name` selects the correct
-per-node config from the `servers/` folder.
+per-node config from the `servers/` folder (on an encrypted ISO, `install.sh` decrypted it
+there from `servers.tar.enc`).
 
 ---
 

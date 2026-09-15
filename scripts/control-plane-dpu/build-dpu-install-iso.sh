@@ -228,7 +228,7 @@ render_template() {
     local tmpl_file="$1"
     shift
     local vars_file
-    vars_file="$(mktemp "$OUTPUT_DIR/gomplate_vars_XXXXXX")"
+    vars_file="$(mktemp "${NODE_OUT_DIR:-$OUTPUT_DIR}/gomplate_vars_XXXXXX")"
 
     while [[ $# -gt 0 ]]; do
         local key="${1%%=*}"
@@ -383,13 +383,27 @@ if [[ "$INSTALL_WITH_LEAF_PASSWORD" == "true" ]]; then
     fi
     [[ -n "$BGP_LEAF_SESSION_PASSWORD" ]] \
         || die "installWithLeafPassword: true but no leaf BGP password was given — export BGP_LEAF_SESSION_PASSWORD or enter it at the prompt"
-    # FRR/HBN accept at most 80 characters for a BGP TCP MD5 password.
-    (( ${#BGP_LEAF_SESSION_PASSWORD} <= 80 )) || die "BGP leaf session password must be at most 80 characters"
+    # The BGP password becomes a TCP MD5 signature key (TCP_MD5SIG); the kernel
+    # accepts at most 80 BYTES, so count bytes, not characters (UTF-8 locales).
+    _pw_bytes=$(LC_ALL=C printf '%s' "$BGP_LEAF_SESSION_PASSWORD" | wc -c | tr -d ' ')
+    (( _pw_bytes <= 80 )) || die "BGP leaf session password must be at most 80 bytes (got $_pw_bytes)"
     [[ "$BGP_LEAF_SESSION_PASSWORD" == *$'\n'* ]] && die "BGP leaf session password must be a single line"
-    log "Leaf BGP password: provided (${#BGP_LEAF_SESSION_PASSWORD} chars); rendered into every startup.yaml inside the encrypted artifacts"
+    log "Leaf BGP password: provided ($_pw_bytes bytes); rendered into every startup.yaml inside the encrypted artifacts"
 elif [[ -n "$BGP_LEAF_SESSION_PASSWORD" ]]; then
     log "BGP_LEAF_SESSION_PASSWORD is set but the site config has no 'installWithLeafPassword: true' — ignoring it"
     BGP_LEAF_SESSION_PASSWORD=""
+fi
+
+# Per-node configs are rendered here before staging. With a leaf password they
+# carry a secret, so they go into a private (0700) tree under the output dir that
+# is removed on ANY exit, success or failure; otherwise into OUTPUT_DIR as before
+# (removed at the end, as always).
+NODE_OUT_DIR="$OUTPUT_DIR"
+CLEANUP_RENDER_DIR=""
+if [[ "$INSTALL_WITH_LEAF_PASSWORD" == "true" ]]; then
+    NODE_OUT_DIR="$(umask 077 && mktemp -d "$OUTPUT_DIR/.render_XXXXXX")"
+    CLEANUP_RENDER_DIR="$NODE_OUT_DIR"
+    trap 'rm -rf ${CLEANUP_RENDER_DIR:-}' EXIT
 fi
 
 _nc=$(yq '.siteControllerNodes | length' "$CONTROL_PLANE_CONFIG")
@@ -511,7 +525,7 @@ for pos in "${!SORTED_INDICES[@]}"; do
     BGP_NEIGHBOR=$(get_nth_addr "$CONTROL_PLANE_PREFIX" $(( pos * 2 + 1 )))
     HOST_IP="${BGP_NEIGHBOR}/31"
     HOST_GATEWAY="$HOSTNET_IP"
-    NODE_DIR="$OUTPUT_DIR/$HOSTNAME"
+    NODE_DIR="$NODE_OUT_DIR/$HOSTNAME"
     mkdir -p "$NODE_DIR"
 
     if [[ "$HAS_FNN" == "true" ]]; then
@@ -571,7 +585,7 @@ else
     step "Downloading artifacts"
     ARTIFACTS_DIR="$(mktemp -d)"
     CLEANUP_ARTIFACTS_DIR="$ARTIFACTS_DIR"
-    trap 'rm -rf ${STAGE_DIR:-} ${CLEANUP_ARTIFACTS_DIR:-}' EXIT
+    trap 'rm -rf ${STAGE_DIR:-} ${CLEANUP_ARTIFACTS_DIR:-} ${CLEANUP_RENDER_DIR:-}' EXIT
 
     BUILD_ARGS=(
         --doca-version "$DOCA_VERSION"
@@ -652,7 +666,7 @@ log "doca_hbn.yaml found in zip: OK"
 step "Assembling ISO contents"
 
 STAGE_DIR="$(mktemp -d)"
-trap 'rm -rf "$STAGE_DIR" ${CLEANUP_ARTIFACTS_DIR:-}' EXIT
+trap 'rm -rf "$STAGE_DIR" ${CLEANUP_ARTIFACTS_DIR:-} ${CLEANUP_RENDER_DIR:-}' EXIT
 
 mkdir -p "$STAGE_DIR/servers"
 
@@ -686,7 +700,7 @@ log "Copying per-node servers..."
 for i in "${!SORTED_INDICES[@]}"; do
     idx="${SORTED_INDICES[$i]}"
     hn=$(yq ".siteControllerNodes[$idx].hostName" "$CONTROL_PLANE_CONFIG")
-    cp -r "$OUTPUT_DIR/$hn" "$STAGE_DIR/servers/$hn"
+    cp -r "$NODE_OUT_DIR/$hn" "$STAGE_DIR/servers/$hn"
     log "  servers/$hn/"
 done
 
@@ -732,8 +746,9 @@ log "Created: $ZIP_OUT  ($(du -h "$ZIP_OUT" | cut -f1))"
 for i in "${!SORTED_INDICES[@]}"; do
     idx="${SORTED_INDICES[$i]}"
     hn=$(yq ".siteControllerNodes[$idx].hostName // \"\"" "$CONTROL_PLANE_CONFIG")
-    [ -n "$hn" ] && rm -rf "${OUTPUT_DIR:?}/$hn"
+    [ -n "$hn" ] && rm -rf "${NODE_OUT_DIR:?}/$hn"
 done
+[[ -n "$CLEANUP_RENDER_DIR" ]] && rm -rf "$CLEANUP_RENDER_DIR"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 

@@ -93,6 +93,19 @@ assert_false "encrypt without passphrase fails" "DPU_ISO_ARTIFACT_PASSWORD= encr
 assert_false "no blob written without passphrase" "[ -e '$WORK/none.enc' ]"
 
 echo ""
+echo "=== an existing tree survives a failed re-install and is replaced by a verified one ==="
+keep="$WORK/keep"; mkdir -p "$keep/oldnode"; echo previous > "$keep/oldnode/startup.yaml"
+assert_false "wrong passphrase over an existing tree fails" "DPU_ISO_ARTIFACT_PASSWORD='wrong' decrypt_artifacts_to '$enc' '$keep' 2>/dev/null"
+assert_true  "existing tree untouched after the failure" "[ '$(cat "$keep/oldnode/startup.yaml")' = previous ]"
+assert_false "tampered archive over an existing tree fails" "DPU_ISO_ARTIFACT_PASSWORD='correct horse' decrypt_artifacts_to '$WORK/tampered.enc' '$keep' 2>/dev/null"
+assert_true  "existing tree still untouched" "[ -f '$keep/oldnode/startup.yaml' ]"
+assert_eq    "no temporary directories left next to it" "0" "$(find "$WORK" -maxdepth 1 -name 'keep.new.*' | wc -l | tr -d ' ')"
+assert_true  "correct passphrase replaces it" "DPU_ISO_ARTIFACT_PASSWORD='correct horse' decrypt_artifacts_to '$enc' '$keep' 2>/dev/null"
+assert_false "old content gone after the verified replacement" "[ -e '$keep/oldnode' ]"
+assert_true  "new content present" "cmp -s '$src/node1/startup.yaml' '$keep/node1/startup.yaml'"
+assert_eq    "replaced tree is mode 700" "700" "$(mode_of "$keep")"
+
+echo ""
 echo "=== manifest catches a modified file (simulated tamper after decrypt) ==="
 dest2="$WORK/out2"
 DPU_ISO_ARTIFACT_PASSWORD='correct horse' decrypt_artifacts_to "$enc" "$dest2" 2>/dev/null
