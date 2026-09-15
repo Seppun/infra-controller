@@ -403,7 +403,7 @@ CLEANUP_RENDER_DIR=""
 if [[ "$INSTALL_WITH_LEAF_PASSWORD" == "true" ]]; then
     NODE_OUT_DIR="$(umask 077 && mktemp -d "$OUTPUT_DIR/.render_XXXXXX")"
     CLEANUP_RENDER_DIR="$NODE_OUT_DIR"
-    trap 'rm -rf ${CLEANUP_RENDER_DIR:-}' EXIT
+    trap 'rm -rf "${CLEANUP_RENDER_DIR:-}"' EXIT
 fi
 
 _nc=$(yq '.siteControllerNodes | length' "$CONTROL_PLANE_CONFIG")
@@ -585,7 +585,7 @@ else
     step "Downloading artifacts"
     ARTIFACTS_DIR="$(mktemp -d)"
     CLEANUP_ARTIFACTS_DIR="$ARTIFACTS_DIR"
-    trap 'rm -rf ${STAGE_DIR:-} ${CLEANUP_ARTIFACTS_DIR:-} ${CLEANUP_RENDER_DIR:-}' EXIT
+    trap 'rm -rf "${STAGE_DIR:-}" "${CLEANUP_ARTIFACTS_DIR:-}" "${CLEANUP_RENDER_DIR:-}"' EXIT
 
     BUILD_ARGS=(
         --doca-version "$DOCA_VERSION"
@@ -666,7 +666,7 @@ log "doca_hbn.yaml found in zip: OK"
 step "Assembling ISO contents"
 
 STAGE_DIR="$(mktemp -d)"
-trap 'rm -rf "$STAGE_DIR" ${CLEANUP_ARTIFACTS_DIR:-} ${CLEANUP_RENDER_DIR:-}' EXIT
+trap 'rm -rf "$STAGE_DIR" "${CLEANUP_ARTIFACTS_DIR:-}" "${CLEANUP_RENDER_DIR:-}"' EXIT
 
 mkdir -p "$STAGE_DIR/servers"
 
