@@ -43,8 +43,10 @@ use carbide_uuid::machine::{
 use carbide_uuid::vpc::VpcId;
 use chrono::{DateTime, Duration, Utc};
 use config_version::{ConfigVersion, Versioned};
-use db::DatabaseError;
+use db::ConditionalWrite::{Applied, NotApplied};
 use db::db_read::PgPoolReader;
+use db::explored_endpoints::EndpointReportNotCurrent;
+use db::{ConditionalWrite, DatabaseError};
 use eyre::eyre;
 use futures::TryFutureExt;
 use futures_util::FutureExt;
@@ -96,6 +98,7 @@ use model::resource_pool::common::CommonPools;
 use model::site_explorer::ExploredEndpoint;
 use sku::{handle_bom_validation_requested, handle_bom_validation_state};
 use sqlx::PgConnection;
+use state_controller::CheckApplied as _;
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -7200,26 +7203,35 @@ async fn handle_ready_boot_config(
             }
 
             let mut txn = ctx.services.db_pool.begin().await?;
-            let verified = db::machine_desired_boot_interface::mark_verified(
+            let verification = db::machine_desired_boot_interface::mark_verified(
                 txn.as_mut(),
                 &mh_snapshot.host_snapshot.id,
                 desired.version,
                 Utc::now(),
             )
             .await?;
-            let next_state = if verified {
-                ManagedHostState::Ready
-            } else {
-                match db::machine_desired_boot_interface::get(
-                    txn.as_mut(),
-                    &mh_snapshot.host_snapshot.id,
-                )
-                .await?
-                {
-                    Some(current_desired) => {
-                        ready_boot_configuring(current_desired, 0, ReadyBootConfigState::Prepare)
+            let next_state = match verification {
+                ConditionalWrite::Applied(()) => ManagedHostState::Ready,
+                ConditionalWrite::NotApplied(reason) => {
+                    tracing::debug!(
+                        machine_id = %mh_snapshot.host_snapshot.id,
+                        desired_version = %desired.version,
+                        ?reason,
+                        "Discarded Ready boot configuration observation",
+                    );
+                    let current_desired = db::machine_desired_boot_interface::get(
+                        txn.as_mut(),
+                        &mh_snapshot.host_snapshot.id,
+                    )
+                    .await?;
+                    match current_desired {
+                        Some(current_desired) => ready_boot_configuring(
+                            current_desired,
+                            0,
+                            ReadyBootConfigState::Prepare,
+                        ),
+                        None => ManagedHostState::Ready,
                     }
-                    None => ManagedHostState::Ready,
                 }
             };
 
@@ -7380,18 +7392,19 @@ async fn complete_host_init_lockdown(
     }
 
     let mut txn = ctx.services.db_pool.begin().await?;
-    let verified = db::machine_desired_boot_interface::mark_verified(
+    let verification = db::machine_desired_boot_interface::mark_verified(
         txn.as_mut(),
         &mh_snapshot.host_snapshot.id,
         desired.version,
         Utc::now(),
     )
     .await?;
-    if !verified {
+    if let ConditionalWrite::NotApplied(reason) = verification {
         tracing::info!(
             machine_id = %mh_snapshot.host_snapshot.id,
             desired_version = %desired.version,
-            "Desired boot interface changed during HostInit verification; leaving it pending",
+            ?reason,
+            "Discarded HostInit boot configuration observation",
         );
     }
     Ok(outcome.with_txn(txn))
@@ -9154,7 +9167,8 @@ impl StateHandler for InstanceStateHandler {
                             version,
                             &netconf,
                         )
-                        .await?;
+                        .await?
+                        .check_applied()?;
                     }
 
                     let next_state = ManagedHostState::Assigned {
@@ -9438,7 +9452,8 @@ impl StateHandler for InstanceStateHandler {
                                 version,
                                 &netconf,
                             )
-                            .await?;
+                            .await?
+                            .check_applied()?;
                         }
                     }
                     let next_state = ManagedHostState::Assigned {
@@ -11989,12 +12004,17 @@ impl HostUpgradeState {
             );
 
             let mut txn = ctx.services.db_pool.begin().await?;
-            db::explored_endpoints::re_explore_if_version_matches(
+            // A rejected request does not finish the firmware wait. The next
+            // controller pass reads the endpoint again.
+            match db::explored_endpoints::re_explore_if_version_matches(
                 endpoint.address,
                 endpoint.report_version,
                 &mut txn,
             )
-            .await?;
+            .await?
+            {
+                Applied(()) | NotApplied(EndpointReportNotCurrent) => {}
+            }
             Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
         }
     }
