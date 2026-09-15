@@ -49,5 +49,5 @@ tenant instances, DPUs being provisioned, and hosts running the discovery OS. Th
 the consumer without requiring the service to infer it from ambiguous data.
 
 `${cloudinit-url}` remains an alias for `${tenant-cloudinit-url}` and continues to work unchanged, so
-existing scripts keep booting. It will be removed in a future release. Scripts referencing it should
-move to `${tenant-cloudinit-url}`; the substitution is the only change required.
+existing scripts keep booting. This alias is deprecated. Scripts referencing it should move to
+`${tenant-cloudinit-url}`; the substitution is the only change required.
