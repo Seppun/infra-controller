@@ -48,13 +48,16 @@ Install on Ubuntu:
 ```bash
 # yq (mikefarah v4) — do NOT use apt-get install yq, that installs the wrong one
 sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-sudo chmod +x /usr/local/bin/yq
+sudo chmod 755 /usr/local/bin/yq
 
 # gomplate
 sudo wget -qO /usr/local/bin/gomplate https://github.com/hairyhenderson/gomplate/releases/latest/download/gomplate_linux-amd64
-sudo chmod +x /usr/local/bin/gomplate
+sudo chmod 755 /usr/local/bin/gomplate
 
-sudo apt-get install wget curl jq zip gzip genisoimage
+sudo apt-get install wget curl jq zip gzip genisoimage xxd docker.io
+
+# verify — `yq --version` must mention mikefarah
+yq --version && gomplate --version
 ```
 
 Install on macOS:
