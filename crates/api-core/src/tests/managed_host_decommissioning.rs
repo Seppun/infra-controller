@@ -15,11 +15,52 @@
  * limitations under the License.
  */
 
+use model::machine::{DecommissioningState, DeconfiguringHostState, ManagedHostState};
 use rpc::forge::DecommissionManagedHostRequest;
 use rpc::forge::forge_server::Forge;
 use tonic::{Code, Request};
 
 use crate::tests::common::api_fixtures::{create_managed_host, create_test_env};
+
+#[crate::sqlx_test]
+async fn uefi_password_job_advances_without_a_scheduled_phase(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    db::machine::advance(
+        &host,
+        &mut txn,
+        &ManagedHostState::Decommissioning {
+            decommissioning_state: DecommissioningState::DeconfiguringHost {
+                deconfiguring_state: DeconfiguringHostState::WaitForUefiPasswordJobScheduled {
+                    job_id: "JID_893866234996".to_string(),
+                },
+            },
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    env.redfish_sim
+        .set_job_state_sequence(vec![libredfish::JobState::Completed]);
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    assert!(matches!(
+        host.current_state(),
+        ManagedHostState::Decommissioning {
+            decommissioning_state: DecommissioningState::DeconfiguringHost {
+                deconfiguring_state: DeconfiguringHostState::WaitForUefiPasswordJobCompletion { .. },
+            },
+        }
+    ));
+    txn.commit().await.unwrap();
+}
 
 #[crate::sqlx_test]
 async fn decommission_requires_redfish_bfb_install_support(pool: sqlx::PgPool) {
