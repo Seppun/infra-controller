@@ -70,13 +70,7 @@ pub fn redact_redfish_response_body<'a>(
 
     let mut response = match serde_json::from_str::<serde_json::Value>(response_body) {
         Ok(response) => response,
-        Err(_)
-            if response_body
-                .trim_start()
-                .as_bytes()
-                .first()
-                .is_some_and(|byte| matches!(*byte, b'{' | b'[')) =>
-        {
+        Err(_) if starts_with_json_container(response_body) => {
             return UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string();
         }
         Err(_) => return mask_all(response_body, sensitive_values),
@@ -100,6 +94,45 @@ pub fn redact_redfish_response_body<'a>(
     }
     serde_json::to_string(&response)
         .unwrap_or_else(|_| UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string())
+}
+
+/// Detects response bodies that should have been JSON objects or arrays.
+///
+/// `serde_json` rejects a leading UTF-8 BOM, so remove one optional BOM before
+/// deciding whether a parse failure must fail closed.
+fn starts_with_json_container(response_body: &str) -> bool {
+    let response_body = response_body.trim_start();
+    let response_body = response_body
+        .strip_prefix('\u{feff}')
+        .unwrap_or(response_body)
+        .trim_start();
+    response_body
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| matches!(*byte, b'{' | b'['))
+}
+
+/// Matches sensitive JSON scalars, including equivalent numeric spellings.
+///
+/// Floating-point comparison intentionally biases toward redaction. Extremely
+/// large adjacent integers can map to the same `f64`, but masking an additional
+/// diagnostic value is safer than returning a credential-bearing response.
+fn json_scalar_is_sensitive(
+    value: &serde_json::Value,
+    sensitive_scalars: &[serde_json::Value],
+) -> bool {
+    sensitive_scalars
+        .iter()
+        .any(|sensitive| match (sensitive, value) {
+            (serde_json::Value::Number(sensitive), serde_json::Value::Number(value)) => {
+                sensitive == value
+                    || sensitive
+                        .as_f64()
+                        .zip(value.as_f64())
+                        .is_some_and(|(sensitive, value)| sensitive == value)
+            }
+            _ => sensitive == value,
+        })
 }
 
 /// Checks every JSON token before the original representation is returned.
@@ -132,9 +165,7 @@ impl SensitiveJsonDetector<'_, '_> {
     }
 
     fn scalar_is_sensitive(self, value: serde_json::Value) -> bool {
-        self.sensitive_scalars
-            .iter()
-            .any(|sensitive| sensitive == &value)
+        json_scalar_is_sensitive(&value, self.sensitive_scalars)
     }
 }
 
@@ -255,10 +286,7 @@ fn redact_json_values(
         scalar @ (serde_json::Value::Null
         | serde_json::Value::Bool(_)
         | serde_json::Value::Number(_)) => {
-            if sensitive_scalars
-                .iter()
-                .any(|sensitive| sensitive == &*scalar)
-            {
+            if json_scalar_is_sensitive(scalar, sensitive_scalars) {
                 *scalar = serde_json::Value::String(REDACTED.to_string());
                 true
             } else {
@@ -533,6 +561,11 @@ mod tests {
                     expect: serde_json::json!({"credential": REDACTED}),
                 },
                 Check {
+                    scenario: "equivalent integer and decimal spellings",
+                    input: (r#"{"credential":1.0}"#, "1"),
+                    expect: serde_json::json!({"credential": REDACTED}),
+                },
+                Check {
                     scenario: "boolean-like secret",
                     input: (r#"{"credential":true}"#, "true"),
                     expect: serde_json::json!({"credential": REDACTED}),
@@ -581,6 +614,11 @@ mod tests {
                     expect: r#"{"detail":"safe"}"#.to_string(),
                 },
                 Check {
+                    scenario: "equivalent integer and decimal spellings",
+                    input: (r#"{"detail":1.0,"detail":"safe"}"#, "1"),
+                    expect: r#"{"detail":"safe"}"#.to_string(),
+                },
+                Check {
                     scenario: "boolean",
                     input: (r#"{"detail":true,"detail":"safe"}"#, "true"),
                     expect: r#"{"detail":"safe"}"#.to_string(),
@@ -611,14 +649,22 @@ mod tests {
     }
 
     #[test]
-    fn redfish_response_body_redaction_fails_closed_above_the_json_depth_limit() {
-        let response = format!("{}\"s\\u0065cret\"{}", "[".repeat(128), "]".repeat(128));
-
-        let redacted = redact_redfish_response_body(&response, ["secret"]);
-
-        assert_eq!(redacted, UNRECOGNIZED_REDFISH_ERROR_RESPONSE);
-        assert!(!redacted.contains("secret"));
-        assert!(!redacted.contains(r"s\u0065cret"));
+    fn redfish_response_body_redaction_fails_closed_for_unparseable_json_containers() {
+        check_values(
+            [
+                Check {
+                    scenario: "above the JSON depth limit",
+                    input: format!("{}\"s\\u0065cret\"{}", "[".repeat(128), "]".repeat(128)),
+                    expect: UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string(),
+                },
+                Check {
+                    scenario: "UTF-8 BOM before escaped credential",
+                    input: "\u{feff}{\"credential\":\"s\\u0065cret\"}".to_string(),
+                    expect: UNRECOGNIZED_REDFISH_ERROR_RESPONSE.to_string(),
+                },
+            ],
+            |response| redact_redfish_response_body(&response, ["secret"]),
+        );
     }
 
     #[test]
