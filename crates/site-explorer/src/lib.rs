@@ -35,7 +35,10 @@ use carbide_uuid::machine::MachineType;
 use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
 use config::SiteExplorerConfig;
-use db::{self, DatabaseError, Transaction, machine, power_shelf as db_power_shelf};
+use db::explored_endpoints::EndpointReportNotCurrent;
+use db::{
+    self, ConditionalWrite, DatabaseError, Transaction, machine, power_shelf as db_power_shelf,
+};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -2938,6 +2941,9 @@ impl SiteExplorer {
         metrics.record_update_explored_endpoints_count("endpoint_error_update_attempts", 0);
         metrics.record_update_explored_endpoints_count("firmware_version_update_attempts", 0);
         metrics.record_update_explored_endpoints_count("redfish_remediation_candidates", 0);
+        // Commit the whole batch before dispatching remediation. A later write
+        // failure must roll back earlier reports and request clearing, since it
+        // also discards the remediation collected for them.
         let mut txn = self.txn_begin().await?;
 
         let mut redfish_errors = Vec::new();
@@ -2979,6 +2985,10 @@ impl SiteExplorer {
                 }
             }
 
+            // Keep topology writes ahead of endpoint writes to match machine deletion's
+            // lock order. A savepoint lets a rejected report undo only its own topology.
+            let mut txn = db::Transaction::begin_inner(txn.as_pgconn()).await?;
+
             // Update possible stale machine versions
             // Configured firmware versions remain the preferred source. Hosts
             // without firmware-management configuration, such as Lenovo GB300
@@ -3017,7 +3027,7 @@ impl SiteExplorer {
                                     "Initial exploration of endpoint"
                                 );
                             }
-                            db::explored_endpoints::try_update(
+                            let report_write = db::explored_endpoints::try_update(
                                 address,
                                 old_version,
                                 &report,
@@ -3026,18 +3036,37 @@ impl SiteExplorer {
                             )
                             .await?;
                             endpoint_report_update_attempts += 1;
+                            match report_write {
+                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+                                    // Skip transient remediation: it would use
+                                    // the rejected report's stale endpoint snapshot.
+                                    txn.rollback().await?;
+                                    continue;
+                                }
+                            }
                         }
                         Err(e) => {
                             // If an endpoint can not be explored we don't delete the known information, since it's
                             // still helpful. The failure might just be intermittent.
-                            db::explored_endpoints::try_update_last_exploration_error(
-                                address,
-                                old_version,
-                                &e,
-                                exploration_duration,
-                                &mut txn,
-                            )
-                            .await?;
+                            let error_write =
+                                db::explored_endpoints::try_update_last_exploration_error(
+                                    address,
+                                    old_version,
+                                    &e,
+                                    exploration_duration,
+                                    &mut txn,
+                                )
+                                .await?;
+                            match error_write {
+                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+                                    // The endpoint disappeared or its report changed
+                                    // while we were probing. Don't remediate an error
+                                    // the database didn't accept.
+                                    redfish_error = None;
+                                }
+                            }
                             endpoint_error_update_attempts += 1;
                         }
                     }
@@ -3090,6 +3119,8 @@ impl SiteExplorer {
                     }
                 }
             }
+
+            txn.commit().await?;
 
             // We wait until the end to add it to redfish_errors so we can move endpoint safely
             if let Some(e) = redfish_error {

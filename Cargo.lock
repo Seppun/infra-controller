@@ -1752,17 +1752,23 @@ dependencies = [
  "clap",
  "dns-record",
  "eyre",
+ "futures",
  "hickory-resolver",
  "hickory-server",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "logfmt",
  "lru",
  "metrics-endpoint",
  "opentelemetry 0.32.0",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "prost",
  "serde",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tracing",
@@ -2319,6 +2325,7 @@ dependencies = [
  "async-trait",
  "carbide-instrument",
  "carbide-secrets",
+ "carbide-test-support",
  "carbide-utils",
  "carbide-uuid",
  "eyre",
@@ -2444,6 +2451,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ipmi",
  "carbide-network",
+ "carbide-rms-mock",
  "carbide-rpc",
  "carbide-test-support",
  "carbide-tls",
@@ -2703,6 +2711,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -2901,7 +2910,6 @@ dependencies = [
  "config-version",
  "duration-str",
  "eyre",
- "librms",
  "mac_address",
  "opentelemetry 0.32.0",
  "reqwest 0.13.4",
@@ -2944,6 +2952,19 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "carbide-rms-mock"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "librms",
+ "mac_address",
+ "serde",
+ "tokio",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]
@@ -3283,6 +3304,7 @@ dependencies = [
  "serde",
  "size",
  "strip-ansi-escapes",
+ "surge-ping",
  "temp-dir",
  "thiserror 2.0.18",
  "tokio",
@@ -6740,6 +6762,7 @@ name = "libnmxc"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "carbide-test-support",
  "clap",
  "http",
  "prost",
