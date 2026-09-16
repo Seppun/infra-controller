@@ -163,10 +163,21 @@ spec:
           livenessProbe:
             failureThreshold: 3
             httpGet:
+              path: /health
               port: 1080
               scheme: HTTP
             initialDelaySeconds: 20
             periodSeconds: 20
+            successThreshold: 1
+            timeoutSeconds: 20
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /ready
+              port: 1080
+              scheme: HTTP
+            initialDelaySeconds: 20
+            periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 20
           volumeMounts:
