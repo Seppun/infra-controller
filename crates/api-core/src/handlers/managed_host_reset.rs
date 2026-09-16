@@ -154,7 +154,13 @@ pub(crate) async fn trigger_managed_host_reset(
                 .into());
             }
 
-            db::machine::clear_managed_host_reset_request(&mut txn, &machine_id, true).await?;
+            // The check above reads an earlier snapshot, so the update can still match no row.
+            if !db::machine::clear_managed_host_reset_request(&mut txn, &machine_id, None).await? {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "no clearable reset request for host {machine_id}"
+                ))
+                .into());
+            }
         }
         // An omitted mode decodes here; reject rather than pick an action for it.
         Mode::Unspecified => {

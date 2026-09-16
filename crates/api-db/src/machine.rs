@@ -2259,36 +2259,48 @@ pub async fn update_managed_host_reset_start_time(
     Ok(())
 }
 
-/// Clears a reset request. With `validate_started_time` the row is left alone once the reset
-/// has started, so a controller that starts concurrently wins over a late `Clear`.
+/// Clears a reset request, reporting whether a row still matched. `None` refuses to withdraw a
+/// reset that has started; `Some` clears only the request carrying that `requested_at`, so a
+/// re-request that replaced it survives.
 pub async fn clear_managed_host_reset_request(
     txn: &mut PgConnection,
     machine_id: &MachineId,
-    validate_started_time: bool,
-) -> Result<(), DatabaseError> {
-    let query = if validate_started_time {
-        "UPDATE machines SET reset_requested=NULL
-            WHERE id=$1 AND reset_requested->'started_at' = 'null'::jsonb RETURNING id"
-    } else {
-        "UPDATE machines SET reset_requested=NULL
-            WHERE id=$1 RETURNING id"
+    observed_requested_at: Option<DateTime<Utc>>,
+) -> Result<bool, DatabaseError> {
+    let query = match observed_requested_at {
+        None => {
+            "UPDATE machines SET reset_requested=NULL
+                WHERE id=$1 AND reset_requested->'started_at' = 'null'::jsonb RETURNING id"
+        }
+        Some(_) => {
+            "UPDATE machines SET reset_requested=NULL
+                WHERE id=$1 AND reset_requested->'requested_at' = $2 RETURNING id"
+        }
     };
 
-    let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(machine_id)
-        .fetch_one(txn)
+    let mut statement = sqlx::query_as::<_, MachineId>(query).bind(machine_id);
+    if let Some(requested_at) = observed_requested_at {
+        // Bound as jsonb so neither side takes a `timestamptz` cast that would round nanoseconds.
+        statement = statement.bind(sqlx::types::Json(requested_at));
+    }
+
+    let cleared = statement
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new("clear reset_requested", e))?;
 
-    Ok(())
+    Ok(cleared.is_some())
 }
 
 pub async fn list_machines_requested_for_reset(
     txn: impl DbReader<'_>,
 ) -> Result<Vec<HostMachine>, DatabaseError> {
     lazy_static! {
+        // Oldest first with the id breaking ties, since Postgres guarantees no order otherwise.
+        // Cast because the stored text has variable fractional digits and will not sort.
         static ref query: String = format!(
-            "{} WHERE m.reset_requested IS NOT NULL",
+            "{} WHERE m.reset_requested IS NOT NULL
+                ORDER BY (m.reset_requested->>'requested_at')::timestamptz, m.id",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }

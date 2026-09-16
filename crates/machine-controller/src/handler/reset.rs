@@ -159,7 +159,17 @@ async fn start_host_reingestion(
         dpu_states.insert(dpu.id, DpuDiscoveringState::Initializing);
     }
 
-    db::machine::clear_managed_host_reset_request(&mut txn, host_id, false).await?;
+    // A request that arrived mid-tick is absent from this snapshot; leave it for the hinge.
+    db::machine::clear_managed_host_reset_request(
+        &mut txn,
+        host_id,
+        state
+            .host_snapshot
+            .reset_requested
+            .as_ref()
+            .map(|request| request.requested_at),
+    )
+    .await?;
 
     tracing::info!(
         host_machine_id = %host_id,

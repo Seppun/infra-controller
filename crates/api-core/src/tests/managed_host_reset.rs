@@ -25,7 +25,7 @@ use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_uuid::machine::MachineId;
-use model::machine::{DpuDiscoveringState, ManagedHostState, ResetState};
+use model::machine::{DpuDiscoveringState, FailureDetails, ManagedHostState, ResetState};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::managed_host_reset_request::Mode;
 use rpc::forge::{ManagedHostResetListRequest, ManagedHostResetRequest, UpdateInitiator};
@@ -52,6 +52,8 @@ fn provisioning_mock() -> MockDpfOperations {
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    // BMC MACs are recorded before discovery, so its DPU service lookup is reached, not skipped.
+    crate::tests::dpf::expect_dpf_service_inventory(&mut mock);
     mock
 }
 
@@ -415,6 +417,15 @@ async fn reset_clear_withdraws_only_a_reset_that_has_not_started(pool: sqlx::PgP
     );
     drop(txn);
 
+    // Nothing pending matches no row, which has to surface as a precondition, not a raw
+    // database error.
+    let error = env
+        .api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Clear))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+
     // Request again, then stamp it started the way the controller hinge does when it moves
     // the host into `Reset`.
     env.api
@@ -547,5 +558,42 @@ async fn reset_re_enters_dpu_discovery_once_the_dpf_crs_are_gone(pool: sqlx::PgP
             .await
             .reset_requested
             .is_none()
+    );
+}
+
+/// The controller parks any host carrying a failure record in `Failed` before it dispatches on
+/// state, and `Failed` refuses `Clear`, so a parked reset can neither finish nor be withdrawn.
+#[crate::sqlx_test]
+async fn reset_completes_while_the_host_carries_a_failure_record(pool: sqlx::PgPool) {
+    let env = reset_controller_env(pool, DpfCrs::Gone).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    enter_deleting_crs(&env, &managed_host).await;
+
+    let mut txn = env.db_txn().await;
+    let host = managed_host.host().db_machine(&mut txn).await;
+    db::machine::update_failure_details(
+        &host,
+        &mut txn,
+        FailureDetails {
+            cause: model::machine::FailureCause::NVMECleanFailed {
+                err: "failed before the reset was requested".to_string(),
+            },
+            source: model::machine::FailureSource::Scout,
+            failed_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+        .await
+        .expect("timed out during state controller iteration");
+
+    let state = host_state(&env, &managed_host).await;
+    assert!(
+        matches!(state, ManagedHostState::DpuDiscoveringState { .. }),
+        "a failure record must not park a reset that is already tearing the host down, \
+         got {state:?}"
     );
 }
