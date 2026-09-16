@@ -70,10 +70,13 @@ impl InternalRBACRules {
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateVpcVirtualization", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteVpc", vec![Machineatron, SiteAgent]);
         x.perm("FindVpcIds", vec![SiteAgent, ForgeAdminCLI, Machineatron]);
         x.perm("FindVpcsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetVpcRoutingState", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
@@ -542,7 +545,7 @@ impl InternalRBACRules {
         x.perm("HeartbeatMachineValidationRun", vec![Scout, SiteAgent]);
         x.perm("AdminBmcReset", vec![ForgeAdminCLI]);
         x.perm("AdminPowerControl", vec![ForgeAdminCLI, SiteAgent, Flow]);
-        x.perm("AdminGpuReset", vec![ForgeAdminCLI, Flow]);
+        x.perm("AdminChassisReset", vec![ForgeAdminCLI, SiteAgent, Flow]);
         x.perm("DisableSecureBoot", vec![ForgeAdminCLI]);
         x.perm("MachineSetup", vec![ForgeAdminCLI]);
         x.perm("SetDpuFirstBootOrder", vec![ForgeAdminCLI]);
@@ -1126,6 +1129,48 @@ mod rbac_rule_tests {
     }
 
     #[test]
+    fn vpc_allocation_operation_permissions() {
+        // Operator certificates map to ExternalUser; its group label is not
+        // compared when matching the rule.
+        for (principal, allowed) in [
+            (
+                Principal::ExternalUser(ExternalUserInfo::new(
+                    None,
+                    "nico-cli-client".to_string(),
+                    None,
+                )),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+                false,
+            ),
+            (Principal::SpiffeMachineIdentifier("dpu".to_string()), false),
+            (Principal::Anonymous, false),
+        ] {
+            for method in [
+                "ReleaseVpcInactiveVni",
+                "GetVpcRoutingState",
+                "ChangeVpcRoutingProfile",
+            ] {
+                assert_eq!(
+                    InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(&principal),
+                    ),
+                    allowed,
+                    "{method}: {}",
+                    principal.as_identifier(),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn admin_cli_can_create_network_segments() {
         assert!(InternalRBACRules::allowed_from_static(
             "CreateNetworkSegment",
@@ -1212,7 +1257,11 @@ mod rbac_rule_tests {
         ));
 
         // REST admin operations proxy to Core as the site agent (issue #4597).
-        for method in ["AdminPowerControl", "TriggerDpuReprovisioning"] {
+        for method in [
+            "AdminPowerControl",
+            "TriggerDpuReprovisioning",
+            "AdminChassisReset",
+        ] {
             assert!(
                 InternalRBACRules::allowed_from_static(
                     method,

@@ -70,12 +70,17 @@ pub struct Api {
     pub database_connection: sqlx::PgPool,
     pub(crate) credential_manager: Arc<dyn CredentialManager>,
     pub(crate) certificate_provider: Arc<dyn CertificateProvider>,
+    /// Ordinary BMC Redfish traffic: nico-bmc-proxy when `[bmc_proxy]` is
+    /// enabled, the direct pool otherwise.
     pub(crate) redfish_pool: Arc<dyn RedfishClientPool>,
     /// Credential-lifecycle operations (password set/rotate/clear, candidate
     /// validation). A sealed trait implemented only by the direct pool, so
     /// handing these to a wrapper pool is a compile error (a wrong-pool
     /// guard, not a wire-path guarantee -- see [`BmcCredentialOps`]).
     pub(crate) bmc_credential_ops: Arc<dyn BmcCredentialOps>,
+    /// HTTP client for the raw Redfish passthrough when `[bmc_proxy]` is
+    /// enabled; `None` keeps the passthrough dialing BMCs directly.
+    pub(crate) bmc_proxy_passthrough: Option<Arc<crate::bmc_proxy::PassthroughClient>>,
     pub(crate) bmc_session_manager: Arc<crate::credentials::BmcSessionManager>,
     pub(crate) eth_data: EthVirtData,
     pub(crate) common_pools: Arc<CommonPools>,
@@ -192,6 +197,20 @@ impl Forge for Api {
         crate::handlers::vpc::update(self, request).await
     }
 
+    async fn change_vpc_routing_profile(
+        &self,
+        request: Request<rpc::VpcChangeRoutingProfileRequest>,
+    ) -> Result<Response<rpc::VpcRoutingState>, Status> {
+        crate::handlers::vpc::change_routing_profile(self, request).await
+    }
+
+    async fn release_vpc_inactive_vni(
+        &self,
+        request: Request<rpc::VpcReleaseInactiveVniRequest>,
+    ) -> Result<Response<rpc::VpcReleaseInactiveVniResult>, Status> {
+        crate::handlers::vpc::release_inactive_vni(self, request).await
+    }
+
     async fn update_vpc_virtualization(
         &self,
         request: Request<rpc::VpcUpdateVirtualizationRequest>,
@@ -218,6 +237,13 @@ impl Forge for Api {
         request: Request<rpc::VpcsByIdsRequest>,
     ) -> Result<Response<rpc::VpcList>, Status> {
         crate::handlers::vpc::find_by_ids(self, request).await
+    }
+
+    async fn get_vpc_routing_state(
+        &self,
+        request: Request<rpc::VpcRoutingStateRequest>,
+    ) -> Result<Response<rpc::VpcRoutingState>, Status> {
+        crate::handlers::vpc::get_routing_state(self, request).await
     }
 
     async fn find_site_prefix_ids(
@@ -1545,11 +1571,11 @@ impl Forge for Api {
         crate::handlers::bmc_endpoint_explorer::admin_bmc_reset(self, request).await
     }
 
-    async fn admin_gpu_reset(
+    async fn admin_chassis_reset(
         &self,
-        request: Request<rpc::AdminGpuResetRequest>,
-    ) -> Result<Response<rpc::AdminGpuResetResponse>, Status> {
-        crate::handlers::gpu_reset::admin_gpu_reset(self, request).await
+        request: Request<rpc::AdminChassisResetRequest>,
+    ) -> Result<Response<rpc::AdminChassisResetResponse>, Status> {
+        crate::handlers::chassis_reset::admin_chassis_reset(self, request).await
     }
 
     async fn disable_secure_boot(
@@ -3400,7 +3426,7 @@ impl Forge for Api {
     async fn find_pending_dpu_service_sync_ids(
         &self,
         request: Request<rpc::FindPendingDpuServiceSyncIdsRequest>,
-    ) -> Result<Response<::rpc::common::StableHostMachineIdList>, Status> {
+    ) -> Result<Response<::rpc::common::HostMachineIdList>, Status> {
         crate::handlers::dpu_service_sync::find_pending_dpu_service_sync_ids(self, request).await
     }
 

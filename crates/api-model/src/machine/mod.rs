@@ -493,7 +493,7 @@ impl ManagedHostStateSnapshot {
     /// - the Machine to be in `Ready` state
     /// - the Machine has not yet been target of an instance creation request
     /// - no health alerts which classification `PreventAllocations` to be set
-    /// - the machine not to be in Maintenance Mode
+    /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
     pub fn is_usable_as_instance(&self, allow_unhealthy: bool) -> Result<(), NotAllocatableReason> {
         // TODO: allow other states than Ready when allow_unhealthy=true. Will require changes to state machine (see Matthias).
@@ -508,6 +508,13 @@ impl ManagedHostStateSnapshot {
         // To avoid that race condition, need to check if db has any entry with given machine id.
         if self.instance.is_some() {
             return Err(NotAllocatableReason::PendingInstanceCreation);
+        }
+
+        let host = &self.host_snapshot;
+        if host.machine_maintenance_requested.is_some()
+            || host.health_reports.maintenance_override().is_some()
+        {
+            return Err(NotAllocatableReason::MaintenanceMode);
         }
 
         // A desired boot-interface update and instance allocation can race
@@ -1867,17 +1874,13 @@ impl NextStateBFBSupport<DpuDiscoveringState> for DpuDiscoveringState {
     fn next_substate_based_on_bfb_support(
         enable_secure_boot: bool,
         state: &ManagedHostStateSnapshot,
-        dpf_enabled_at_site: bool,
+        _dpf_enabled_at_site: bool,
     ) -> DpuDiscoveringState {
-        // DPF should be given priority over secure boot.
-        // DPF does not support Secure boot.
-        let is_dpf_based_provisioning_possible =
-            dpf_based_dpu_provisioning_possible(state, dpf_enabled_at_site, false);
+        if state.host_snapshot.config.dpf.used_for_ingestion {
+            return DpuDiscoveringState::RebootAllDPUS;
+        }
 
-        if !is_dpf_based_provisioning_possible
-            && enable_secure_boot
-            && bfb_install_support(&state.dpu_snapshots)
-        {
+        if enable_secure_boot && bfb_install_support(&state.dpu_snapshots) {
             // Move with a redfish install path
             DpuDiscoveringState::EnableSecureBoot {
                 count: 0,
@@ -2669,7 +2672,7 @@ pub struct ReprovisionRequest {
     pub restart_reprovision_requested_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "lowercase")]
 #[allow(clippy::enum_variant_names)]
 pub enum MachineMaintenanceOperation {
@@ -2679,6 +2682,8 @@ pub enum MachineMaintenanceOperation {
     PowerOff,
     /// Reset the host (restart / AC power cycle).
     Reset,
+    /// Reset the identified Redfish chassis through the host BMC.
+    ChassisReset { chassis_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4007,6 +4012,47 @@ mod tests {
     }
 
     #[test]
+    fn ready_host_with_pending_maintenance_is_not_allocatable() {
+        let mut snapshot = managed_host_state_snapshot();
+        snapshot.host_snapshot.machine_maintenance_requested = Some(MachineMaintenanceRequest {
+            requested_at: chrono::Utc::now(),
+            initiator: "test".to_string(),
+            operation: MachineMaintenanceOperation::ChassisReset {
+                chassis_id: "HGX_Chassis_0".to_string(),
+            },
+        });
+
+        assert_eq!(
+            snapshot.is_usable_as_instance(false),
+            Err(NotAllocatableReason::MaintenanceMode),
+        );
+    }
+
+    #[test]
+    fn operator_maintenance_blocks_allocation_until_cleared() {
+        let mut snapshot = managed_host_state_snapshot();
+        let mut alert = alert_with_classifications(vec![
+            health_report::HealthAlertClassification::prevent_allocations(),
+        ]);
+        alert.id = "Maintenance".parse().unwrap();
+        snapshot.host_snapshot.health_reports.merges.insert(
+            "maintenance".to_string(),
+            health_report_with_alerts(vec![alert]),
+        );
+
+        assert_eq!(
+            snapshot.is_usable_as_instance(true),
+            Err(NotAllocatableReason::MaintenanceMode),
+        );
+        snapshot
+            .host_snapshot
+            .health_reports
+            .merges
+            .remove("maintenance");
+        assert_eq!(snapshot.is_usable_as_instance(true), Ok(()));
+    }
+
+    #[test]
     fn boot_configuring_state_has_stable_state_strings() {
         let state = ManagedHostState::BootConfiguring {
             desired_version: ConfigVersion::new(7),
@@ -4224,14 +4270,25 @@ mod tests {
                         enable_secure_boot: true,
                     },
                     expect: (
-                        DpuDiscoveringState::DisableSecureBoot {
-                            count: 0,
-                            disable_secure_boot_state: Some(
-                                SetSecureBootState::CheckSecureBootStatus,
-                            ),
-                        },
+                        DpuDiscoveringState::RebootAllDPUS,
                         ReprovisionState::DpfStates {
                             substate: DpfState::Reprovisioning,
+                        },
+                    ),
+                },
+                Check {
+                    scenario: "DPF-enabled site uses secure boot fallback when the host was not selected",
+                    input: DpuProvisioningRouteInput {
+                        dpf: dpf_input(&[BF3_SUPPORTED]),
+                        enable_secure_boot: true,
+                    },
+                    expect: (
+                        DpuDiscoveringState::EnableSecureBoot {
+                            count: 0,
+                            enable_secure_boot_state: SetSecureBootState::CheckSecureBootStatus,
+                        },
+                        ReprovisionState::InstallDpuOs {
+                            substate: InstallDpuOsState::InstallingBFB,
                         },
                     ),
                 },
@@ -4294,7 +4351,7 @@ mod tests {
                     ),
                 },
                 Check {
-                    scenario: "legacy subset only blocks the reprovision DPF route",
+                    scenario: "unselected host only uses the legacy initial-ingestion route",
                     input: DpuProvisioningRouteInput {
                         dpf: DpfProvisioningInput {
                             dpus: &[BF3_REQUESTED, BF3_SUPPORTED],
@@ -4303,11 +4360,9 @@ mod tests {
                         enable_secure_boot: true,
                     },
                     expect: (
-                        DpuDiscoveringState::DisableSecureBoot {
+                        DpuDiscoveringState::EnableSecureBoot {
                             count: 0,
-                            disable_secure_boot_state: Some(
-                                SetSecureBootState::CheckSecureBootStatus,
-                            ),
+                            enable_secure_boot_state: SetSecureBootState::CheckSecureBootStatus,
                         },
                         ReprovisionState::InstallDpuOs {
                             substate: InstallDpuOsState::InstallingBFB,

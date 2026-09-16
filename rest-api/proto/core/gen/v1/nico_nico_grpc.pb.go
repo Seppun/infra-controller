@@ -34,10 +34,13 @@ const (
 	Forge_FindDomainLegacy_FullMethodName                                   = "/forge.Forge/FindDomainLegacy"
 	Forge_CreateVpc_FullMethodName                                          = "/forge.Forge/CreateVpc"
 	Forge_UpdateVpc_FullMethodName                                          = "/forge.Forge/UpdateVpc"
+	Forge_ChangeVpcRoutingProfile_FullMethodName                            = "/forge.Forge/ChangeVpcRoutingProfile"
+	Forge_ReleaseVpcInactiveVni_FullMethodName                              = "/forge.Forge/ReleaseVpcInactiveVni"
 	Forge_UpdateVpcVirtualization_FullMethodName                            = "/forge.Forge/UpdateVpcVirtualization"
 	Forge_DeleteVpc_FullMethodName                                          = "/forge.Forge/DeleteVpc"
 	Forge_FindVpcIds_FullMethodName                                         = "/forge.Forge/FindVpcIds"
 	Forge_FindVpcsByIds_FullMethodName                                      = "/forge.Forge/FindVpcsByIds"
+	Forge_GetVpcRoutingState_FullMethodName                                 = "/forge.Forge/GetVpcRoutingState"
 	Forge_CreateSpxPartition_FullMethodName                                 = "/forge.Forge/CreateSpxPartition"
 	Forge_DeleteSpxPartition_FullMethodName                                 = "/forge.Forge/DeleteSpxPartition"
 	Forge_FindSpxPartitionIds_FullMethodName                                = "/forge.Forge/FindSpxPartitionIds"
@@ -352,7 +355,7 @@ const (
 	Forge_UpdateMachineValidationRun_FullMethodName                         = "/forge.Forge/UpdateMachineValidationRun"
 	Forge_AdminBmcReset_FullMethodName                                      = "/forge.Forge/AdminBmcReset"
 	Forge_AdminPowerControl_FullMethodName                                  = "/forge.Forge/AdminPowerControl"
-	Forge_AdminGpuReset_FullMethodName                                      = "/forge.Forge/AdminGpuReset"
+	Forge_AdminChassisReset_FullMethodName                                  = "/forge.Forge/AdminChassisReset"
 	Forge_DisableSecureBoot_FullMethodName                                  = "/forge.Forge/DisableSecureBoot"
 	Forge_Lockdown_FullMethodName                                           = "/forge.Forge/Lockdown"
 	Forge_LockdownStatus_FullMethodName                                     = "/forge.Forge/LockdownStatus"
@@ -539,10 +542,21 @@ type ForgeClient interface {
 	// VPC
 	CreateVpc(ctx context.Context, in *VpcCreationRequest, opts ...grpc.CallOption) (*Vpc, error)
 	UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts ...grpc.CallOption) (*VpcUpdateResult, error)
+	// Changes an FNN VPC's named profile and active VNI while retaining the old
+	// allocation. Success means Core committed, not that the dataplane converged.
+	ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
+	// Operator cleanup after independently verifying that no DPU or fabric route
+	// still uses the retained VNI. Core does not verify dataplane convergence.
+	ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error)
+	// Deletion does not release a retained VNI implicitly. Call
+	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+	// Retained or inconsistent owned allocations cause FailedPrecondition.
 	DeleteVpc(ctx context.Context, in *VpcDeletionRequest, opts ...grpc.CallOption) (*VpcDeletionResult, error)
 	FindVpcIds(ctx context.Context, in *VpcSearchFilter, opts ...grpc.CallOption) (*VpcIdList, error)
 	FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, opts ...grpc.CallOption) (*VpcList, error)
+	// Reads persisted VPC routing and allocation state without changing it.
+	GetVpcRoutingState(ctx context.Context, in *VpcRoutingStateRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
 	CreateSpxPartition(ctx context.Context, in *SpxPartitionCreationRequest, opts ...grpc.CallOption) (*SpxPartition, error)
 	DeleteSpxPartition(ctx context.Context, in *SpxPartitionDeletionRequest, opts ...grpc.CallOption) (*SpxPartitionDeletionResult, error)
 	FindSpxPartitionIds(ctx context.Context, in *SpxPartitionSearchFilter, opts ...grpc.CallOption) (*SpxPartitionIdList, error)
@@ -1105,8 +1119,22 @@ type ForgeClient interface {
 	AdminBmcReset(ctx context.Context, in *AdminBmcResetRequest, opts ...grpc.CallOption) (*AdminBmcResetResponse, error)
 	// Admin Power Control
 	AdminPowerControl(ctx context.Context, in *AdminPowerControlRequest, opts ...grpc.CallOption) (*AdminPowerControlResponse, error)
-	// Reset a GPU baseboard (e.g. HGX) via Redfish Chassis.Reset, resetting all GPUs on it; v1 accepts only ForceRestart and rejects all other actions.
-	AdminGpuReset(ctx context.Context, in *AdminGpuResetRequest, opts ...grpc.CallOption) (*AdminGpuResetResponse, error)
+	// Queues a Redfish Chassis.Reset request for later execution by the machine
+	// controller through Maintenance state. Success means the request was accepted,
+	// not that the reset completed. Requests are accepted only for hosts in Ready.
+	// The controller returns the host to Ready after the Redfish command succeeds,
+	// and to Failed if execution fails.
+	// Operator maintenance must be enabled with SetMaintenance and is preserved
+	// after execution. Disable it only after verifying target chassis readiness.
+	//
+	// v1 accepts only ForceRestart. An omitted action has proto3's On default and
+	// is rejected with INVALID_ARGUMENT, as are a missing/invalid machine_id or
+	// missing chassis_id.
+	// NOT_FOUND means the machine does not exist. FAILED_PRECONDITION means
+	// operator maintenance is disabled, an instance exists, or the host is not in Ready.
+	//
+	// This replaces the unused AdminGpuReset RPC; no compatibility alias is kept.
+	AdminChassisReset(ctx context.Context, in *AdminChassisResetRequest, opts ...grpc.CallOption) (*AdminChassisResetResponse, error)
 	// Disable Secure Boot
 	DisableSecureBoot(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*DisableSecureBootResponse, error)
 	// Set Lockdown (Enable or Disable)
@@ -1369,7 +1397,8 @@ type ForgeClient interface {
 	// Helm/docker versions for the nico DPF mandatory services, from both
 	// the nico config and the live DPUServiceTemplate CRs.
 	GetDPFServiceVersions(ctx context.Context, in *GetDPFServiceVersionsRequest, opts ...grpc.CallOption) (*DPFServiceVersionsResponse, error)
-	// Machines DPF is waiting on before a changed DPUService can roll out.
+	// Predicted or stable host machines DPF is waiting on before a changed
+	// DPUService can roll out.
 	//
 	// Required rather than convenient: the release RPC has no fleet-wide form, so
 	// this is the only way to discover which machines to name. Split ids-then-
@@ -1534,6 +1563,26 @@ func (c *forgeClient) UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts 
 	return out, nil
 }
 
+func (c *forgeClient) ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcRoutingState)
+	err := c.cc.Invoke(ctx, Forge_ChangeVpcRoutingProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcReleaseInactiveVniResult)
+	err := c.cc.Invoke(ctx, Forge_ReleaseVpcInactiveVni_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VpcUpdateVirtualizationResult)
@@ -1568,6 +1617,16 @@ func (c *forgeClient) FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, o
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VpcList)
 	err := c.cc.Invoke(ctx, Forge_FindVpcsByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetVpcRoutingState(ctx context.Context, in *VpcRoutingStateRequest, opts ...grpc.CallOption) (*VpcRoutingState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcRoutingState)
+	err := c.cc.Invoke(ctx, Forge_GetVpcRoutingState_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -4717,10 +4776,10 @@ func (c *forgeClient) AdminPowerControl(ctx context.Context, in *AdminPowerContr
 	return out, nil
 }
 
-func (c *forgeClient) AdminGpuReset(ctx context.Context, in *AdminGpuResetRequest, opts ...grpc.CallOption) (*AdminGpuResetResponse, error) {
+func (c *forgeClient) AdminChassisReset(ctx context.Context, in *AdminChassisResetRequest, opts ...grpc.CallOption) (*AdminChassisResetResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AdminGpuResetResponse)
-	err := c.cc.Invoke(ctx, Forge_AdminGpuReset_FullMethodName, in, out, cOpts...)
+	out := new(AdminChassisResetResponse)
+	err := c.cc.Invoke(ctx, Forge_AdminChassisReset_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6354,10 +6413,21 @@ type ForgeServer interface {
 	// VPC
 	CreateVpc(context.Context, *VpcCreationRequest) (*Vpc, error)
 	UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error)
+	// Changes an FNN VPC's named profile and active VNI while retaining the old
+	// allocation. Success means Core committed, not that the dataplane converged.
+	ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error)
+	// Operator cleanup after independently verifying that no DPU or fabric route
+	// still uses the retained VNI. Core does not verify dataplane convergence.
+	ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error)
+	// Deletion does not release a retained VNI implicitly. Call
+	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+	// Retained or inconsistent owned allocations cause FailedPrecondition.
 	DeleteVpc(context.Context, *VpcDeletionRequest) (*VpcDeletionResult, error)
 	FindVpcIds(context.Context, *VpcSearchFilter) (*VpcIdList, error)
 	FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error)
+	// Reads persisted VPC routing and allocation state without changing it.
+	GetVpcRoutingState(context.Context, *VpcRoutingStateRequest) (*VpcRoutingState, error)
 	CreateSpxPartition(context.Context, *SpxPartitionCreationRequest) (*SpxPartition, error)
 	DeleteSpxPartition(context.Context, *SpxPartitionDeletionRequest) (*SpxPartitionDeletionResult, error)
 	FindSpxPartitionIds(context.Context, *SpxPartitionSearchFilter) (*SpxPartitionIdList, error)
@@ -6920,8 +6990,22 @@ type ForgeServer interface {
 	AdminBmcReset(context.Context, *AdminBmcResetRequest) (*AdminBmcResetResponse, error)
 	// Admin Power Control
 	AdminPowerControl(context.Context, *AdminPowerControlRequest) (*AdminPowerControlResponse, error)
-	// Reset a GPU baseboard (e.g. HGX) via Redfish Chassis.Reset, resetting all GPUs on it; v1 accepts only ForceRestart and rejects all other actions.
-	AdminGpuReset(context.Context, *AdminGpuResetRequest) (*AdminGpuResetResponse, error)
+	// Queues a Redfish Chassis.Reset request for later execution by the machine
+	// controller through Maintenance state. Success means the request was accepted,
+	// not that the reset completed. Requests are accepted only for hosts in Ready.
+	// The controller returns the host to Ready after the Redfish command succeeds,
+	// and to Failed if execution fails.
+	// Operator maintenance must be enabled with SetMaintenance and is preserved
+	// after execution. Disable it only after verifying target chassis readiness.
+	//
+	// v1 accepts only ForceRestart. An omitted action has proto3's On default and
+	// is rejected with INVALID_ARGUMENT, as are a missing/invalid machine_id or
+	// missing chassis_id.
+	// NOT_FOUND means the machine does not exist. FAILED_PRECONDITION means
+	// operator maintenance is disabled, an instance exists, or the host is not in Ready.
+	//
+	// This replaces the unused AdminGpuReset RPC; no compatibility alias is kept.
+	AdminChassisReset(context.Context, *AdminChassisResetRequest) (*AdminChassisResetResponse, error)
 	// Disable Secure Boot
 	DisableSecureBoot(context.Context, *BmcEndpointRequest) (*DisableSecureBootResponse, error)
 	// Set Lockdown (Enable or Disable)
@@ -7184,7 +7268,8 @@ type ForgeServer interface {
 	// Helm/docker versions for the nico DPF mandatory services, from both
 	// the nico config and the live DPUServiceTemplate CRs.
 	GetDPFServiceVersions(context.Context, *GetDPFServiceVersionsRequest) (*DPFServiceVersionsResponse, error)
-	// Machines DPF is waiting on before a changed DPUService can roll out.
+	// Predicted or stable host machines DPF is waiting on before a changed
+	// DPUService can roll out.
 	//
 	// Required rather than convenient: the release RPC has no fleet-wide form, so
 	// this is the only way to discover which machines to name. Split ids-then-
@@ -7267,6 +7352,12 @@ func (UnimplementedForgeServer) CreateVpc(context.Context, *VpcCreationRequest) 
 func (UnimplementedForgeServer) UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpc not implemented")
 }
+func (UnimplementedForgeServer) ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error) {
+	return nil, status.Error(codes.Unimplemented, "method ChangeVpcRoutingProfile not implemented")
+}
+func (UnimplementedForgeServer) ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseVpcInactiveVni not implemented")
+}
 func (UnimplementedForgeServer) UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpcVirtualization not implemented")
 }
@@ -7278,6 +7369,9 @@ func (UnimplementedForgeServer) FindVpcIds(context.Context, *VpcSearchFilter) (*
 }
 func (UnimplementedForgeServer) FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindVpcsByIds not implemented")
+}
+func (UnimplementedForgeServer) GetVpcRoutingState(context.Context, *VpcRoutingStateRequest) (*VpcRoutingState, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetVpcRoutingState not implemented")
 }
 func (UnimplementedForgeServer) CreateSpxPartition(context.Context, *SpxPartitionCreationRequest) (*SpxPartition, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateSpxPartition not implemented")
@@ -8221,8 +8315,8 @@ func (UnimplementedForgeServer) AdminBmcReset(context.Context, *AdminBmcResetReq
 func (UnimplementedForgeServer) AdminPowerControl(context.Context, *AdminPowerControlRequest) (*AdminPowerControlResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AdminPowerControl not implemented")
 }
-func (UnimplementedForgeServer) AdminGpuReset(context.Context, *AdminGpuResetRequest) (*AdminGpuResetResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method AdminGpuReset not implemented")
+func (UnimplementedForgeServer) AdminChassisReset(context.Context, *AdminChassisResetRequest) (*AdminChassisResetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdminChassisReset not implemented")
 }
 func (UnimplementedForgeServer) DisableSecureBoot(context.Context, *BmcEndpointRequest) (*DisableSecureBootResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DisableSecureBoot not implemented")
@@ -8922,6 +9016,42 @@ func _Forge_UpdateVpc_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_ChangeVpcRoutingProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcChangeRoutingProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ChangeVpcRoutingProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ChangeVpcRoutingProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ChangeVpcRoutingProfile(ctx, req.(*VpcChangeRoutingProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReleaseVpcInactiveVni_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcReleaseInactiveVniRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReleaseVpcInactiveVni(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReleaseVpcInactiveVni_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReleaseVpcInactiveVni(ctx, req.(*VpcReleaseInactiveVniRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_UpdateVpcVirtualization_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(VpcUpdateVirtualizationRequest)
 	if err := dec(in); err != nil {
@@ -8990,6 +9120,24 @@ func _Forge_FindVpcsByIds_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).FindVpcsByIds(ctx, req.(*VpcsByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetVpcRoutingState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcRoutingStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetVpcRoutingState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetVpcRoutingState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetVpcRoutingState(ctx, req.(*VpcRoutingStateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -14646,20 +14794,20 @@ func _Forge_AdminPowerControl_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_AdminGpuReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AdminGpuResetRequest)
+func _Forge_AdminChassisReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdminChassisResetRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).AdminGpuReset(ctx, in)
+		return srv.(ForgeServer).AdminChassisReset(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_AdminGpuReset_FullMethodName,
+		FullMethod: Forge_AdminChassisReset_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).AdminGpuReset(ctx, req.(*AdminGpuResetRequest))
+		return srv.(ForgeServer).AdminChassisReset(ctx, req.(*AdminChassisResetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -17585,6 +17733,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateVpc_Handler,
 		},
 		{
+			MethodName: "ChangeVpcRoutingProfile",
+			Handler:    _Forge_ChangeVpcRoutingProfile_Handler,
+		},
+		{
+			MethodName: "ReleaseVpcInactiveVni",
+			Handler:    _Forge_ReleaseVpcInactiveVni_Handler,
+		},
+		{
 			MethodName: "UpdateVpcVirtualization",
 			Handler:    _Forge_UpdateVpcVirtualization_Handler,
 		},
@@ -17599,6 +17755,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FindVpcsByIds",
 			Handler:    _Forge_FindVpcsByIds_Handler,
+		},
+		{
+			MethodName: "GetVpcRoutingState",
+			Handler:    _Forge_GetVpcRoutingState_Handler,
 		},
 		{
 			MethodName: "CreateSpxPartition",
@@ -18857,8 +19017,8 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_AdminPowerControl_Handler,
 		},
 		{
-			MethodName: "AdminGpuReset",
-			Handler:    _Forge_AdminGpuReset_Handler,
+			MethodName: "AdminChassisReset",
+			Handler:    _Forge_AdminChassisReset_Handler,
 		},
 		{
 			MethodName: "DisableSecureBoot",

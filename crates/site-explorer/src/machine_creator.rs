@@ -23,7 +23,8 @@ use carbide_secrets::credentials::{
 };
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId};
-use db::Transaction;
+use db::machine::MachineNetworkConfigNotCurrent;
+use db::{ConditionalWrite, Transaction};
 use itertools::Itertools;
 use librms::RmsApi;
 use librms::protos::rack_manager as rms;
@@ -34,8 +35,9 @@ use model::hardware_info::HardwareInfo;
 use model::machine::machine_id::host_id_from_dpu_hardware_info;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
-    AnyMachine, CURRENT_STATE_MODEL_VERSION, ConfigureAstraState, MachineInterfaceSnapshot,
-    ManagedHostState, pick_boot_interface, pick_boot_prediction,
+    AnyMachine, CURRENT_STATE_MODEL_VERSION, ConfigureAstraState, LoadSnapshotOptions,
+    MachineInterfaceSnapshot, ManagedHostState, dpf_based_dpu_provisioning_possible,
+    pick_boot_interface, pick_boot_prediction,
 };
 use model::machine_boot_interface::{
     BootInterfaceSelectionSource, MachineBootInterface, MachineBootInterfaceTarget,
@@ -68,6 +70,7 @@ pub struct MachineCreator {
     rack_profiles: Arc<RackProfileConfig>,
     rms_client: Option<Arc<dyn RmsApi>>,
     credential_manager: Arc<dyn CredentialManager>,
+    dpf_enabled_at_site: bool,
 }
 
 impl MachineCreator {
@@ -79,6 +82,7 @@ impl MachineCreator {
         rack_profiles: Arc<RackProfileConfig>,
         rms_client: Option<Arc<dyn RmsApi>>,
         credential_manager: Arc<dyn CredentialManager>,
+        dpf_enabled_at_site: bool,
     ) -> Self {
         Self {
             database_connection,
@@ -87,6 +91,7 @@ impl MachineCreator {
             rack_profiles,
             rms_client,
             credential_manager,
+            dpf_enabled_at_site,
         }
     }
 
@@ -398,6 +403,13 @@ impl MachineCreator {
         )
         .await?;
 
+        if self
+            .dpf_based_dpu_provisioning_possible(&mut txn, &host_machine_id)
+            .await?
+        {
+            db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &host_machine_id).await?;
+        }
+
         let mut rack_profile_id = None;
         if let Some(rack_id) = machine_data.and_then(|d| d.rack_id.as_ref()) {
             tracing::info!(%rack_id, %host_machine_id, "Ensuring rack exists for host machine");
@@ -518,6 +530,27 @@ impl MachineCreator {
         }
 
         Ok(true)
+    }
+
+    async fn dpf_based_dpu_provisioning_possible(
+        &self,
+        txn: &mut PgConnection,
+        host_machine_id: &HostMachineId,
+    ) -> SiteExplorerResult<bool> {
+        let managed_host =
+            db::managed_host::load_snapshot(txn, host_machine_id, LoadSnapshotOptions::default())
+                .await?
+                .ok_or_else(|| {
+                    SiteExplorerError::internal(format!(
+                        "managed host {host_machine_id} disappeared while being created"
+                    ))
+                })?;
+
+        Ok(dpf_based_dpu_provisioning_possible(
+            &managed_host,
+            self.dpf_enabled_at_site,
+            false,
+        ))
     }
 
     // Returns MachineId if machine was created.
@@ -1297,10 +1330,11 @@ impl MachineCreator {
             .await?;
         }
 
-        // A stale version must fail the whole transaction so any addresses
-        // allocated above return to their pools.
-        if !db::machine::try_update_network_config(txn, &dpu_machine.id, version, &network_config)
-            .await?
+        // Missing and changed targets share this rejection. Fail the whole
+        // transaction so any addresses allocated above return to their pools.
+        if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+            db::machine::try_update_network_config(txn, &dpu_machine.id, version, &network_config)
+                .await?
         {
             return Err(db::DatabaseError::ConcurrentModificationError(
                 "machine",
@@ -1327,13 +1361,20 @@ impl MachineCreator {
                 db::machine::get_network_config(&mut *txn, host_machine_id)
                     .await?
                     .take();
-            db::machine::try_update_network_config(
-                txn,
-                host_machine_id,
-                network_config_version,
-                &network_config,
-            )
-            .await?;
+            if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+                db::machine::try_update_network_config(
+                    txn,
+                    host_machine_id,
+                    network_config_version,
+                    &network_config,
+                )
+                .await?
+            {
+                return Err(db::DatabaseError::FailedPrecondition(format!(
+                    "network configuration for machine {host_machine_id} changed or is no longer available"
+                ))
+                .into());
+            }
         }
         Ok(active_config_changed)
     }
