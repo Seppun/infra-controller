@@ -21,9 +21,9 @@ mod sources;
 
 pub use cluster::ClusterEndpointSource;
 pub use model::{
-    BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSnapshot, EndpointSource,
-    InventorySnapshot, MachineData, PowerShelfData, RackInventory, SharedSystemUuid, SwitchData,
-    SwitchEndpointRole,
+    BmcAddr, BmcCredentials, BmcEndpoint, ComponentInventory, EndpointMetadata, EndpointSnapshot,
+    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, RackInventory,
+    SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 pub use sources::{CompositeEndpointSource, StaticEndpointSource};
 

@@ -16,13 +16,12 @@
  */
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use prometheus::{Gauge, GaugeVec, Opts, Registry};
 
 use crate::HealthError;
-use crate::endpoint::{BmcEndpoint, EndpointMetadata, RackInventory};
+use crate::endpoint::{ComponentInventory, EndpointMetadata, RackInventory};
 
 const COMPONENT_LABELS: [&str; 11] = [
     "rack_id",
@@ -130,8 +129,8 @@ struct ComponentSeries {
 }
 
 impl ComponentSeries {
-    fn from_endpoint(endpoint: &BmcEndpoint, rack: &RackSeries) -> Option<Self> {
-        let metadata = endpoint.metadata.as_ref()?;
+    fn from_inventory(component: &ComponentInventory, rack: &RackSeries) -> Option<Self> {
+        let metadata = &component.metadata;
         let (
             subsystem,
             component_uid,
@@ -145,7 +144,11 @@ impl ComponentSeries {
             EndpointMetadata::Machine(machine) => (
                 "compute",
                 machine.machine_id.as_ref()?.to_string(),
-                endpoint.addr.mac.to_string(),
+                component
+                    .bmc_mac
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
                 machine
                     .nvlink_domain_uuid
                     .as_ref()
@@ -169,11 +172,11 @@ impl ComponentSeries {
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or_else(|| switch.serial.clone()),
-                if switch.endpoint_role == crate::endpoint::SwitchEndpointRole::Bmc {
-                    endpoint.addr.mac.to_string()
-                } else {
-                    String::new()
-                },
+                component
+                    .bmc_mac
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
                 switch
                     .nvlink_domain_uuid
                     .as_ref()
@@ -197,7 +200,11 @@ impl ComponentSeries {
                     .as_ref()
                     .map(ToString::to_string)
                     .or_else(|| power_shelf.serial.clone())?,
-                endpoint.addr.mac.to_string(),
+                component
+                    .bmc_mac
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
                 String::new(),
                 false,
                 false,
@@ -230,12 +237,7 @@ impl ComponentSeries {
         )
     }
 
-    /// Combines metadata from NICo's BMC and host views of the same component.
-    ///
-    /// Switches can have two endpoints. Only the BMC endpoint contributes the
-    /// component-to-BMC identity; the host endpoint can still contribute NMX-C
-    /// state. This prevents endpoint discovery order from substituting the NVOS
-    /// MAC address for the switch BMC MAC address.
+    /// Combines duplicate authoritative observations of the same component.
     fn merge(&mut self, other: &Self) {
         debug_assert_eq!(self.identity(), other.identity());
 
@@ -330,14 +332,14 @@ impl InventoryMetrics {
         })
     }
 
-    pub(crate) fn reconcile(&mut self, racks: &[RackInventory], endpoints: &[Arc<BmcEndpoint>]) {
-        self.reconcile_at(racks, endpoints, unix_now_seconds());
+    pub(crate) fn reconcile(&mut self, racks: &[RackInventory], components: &[ComponentInventory]) {
+        self.reconcile_at(racks, components, unix_now_seconds());
     }
 
     fn reconcile_at(
         &mut self,
         racks: &[RackInventory],
-        endpoints: &[Arc<BmcEndpoint>],
+        components: &[ComponentInventory],
         observed_at_seconds: f64,
     ) {
         let desired_racks = racks
@@ -349,17 +351,15 @@ impl InventoryMetrics {
             .map(|rack| (rack.rack_id.as_str(), rack))
             .collect::<BTreeMap<_, _>>();
 
-        // NICo returns both BMC and host endpoints for a switch. Key by the
-        // component identity so those endpoints produce one inventory series.
+        // Key by component identity so duplicate source observations produce
+        // one inventory series.
         let mut desired_by_identity: BTreeMap<_, ComponentSeries> = BTreeMap::new();
-        for endpoint in endpoints {
-            let Some(rack_id) = endpoint.rack_id.as_ref().map(ToString::to_string) else {
-                continue;
-            };
+        for inventory_component in components {
+            let rack_id = inventory_component.rack_id.to_string();
             let Some(rack) = racks_by_id.get(rack_id.as_str()) else {
                 continue;
             };
-            let Some(component) = ComponentSeries::from_endpoint(endpoint, rack) else {
+            let Some(component) = ComponentSeries::from_inventory(inventory_component, rack) else {
                 continue;
             };
             desired_by_identity
@@ -466,7 +466,6 @@ fn unix_now_seconds() -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
     use std::str::FromStr;
 
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
@@ -477,37 +476,27 @@ mod tests {
     use prometheus::{Encoder, TextEncoder};
 
     use super::*;
-    use crate::endpoint::test_support::endpoint_with_creds;
-    use crate::endpoint::{
-        BmcAddr, BmcCredentials, EndpointMetadata, SwitchData, SwitchEndpointRole,
-    };
+    use crate::endpoint::{EndpointMetadata, SwitchData, SwitchEndpointRole};
 
     fn test_switch_id(seed: u8) -> SwitchId {
         SwitchId::new(SwitchIdSource::Tpm, [seed; 32], SwitchType::NvLink)
     }
 
-    fn switch_endpoint(role: SwitchEndpointRole, mac: &str) -> Arc<BmcEndpoint> {
-        switch_endpoint_in_rack(role, mac, "D09", 7, "11111111-1111-1111-1111-111111111111")
+    fn switch_component(role: SwitchEndpointRole, mac: &str) -> ComponentInventory {
+        switch_component_in_rack(role, mac, "D09", 7, "11111111-1111-1111-1111-111111111111")
     }
 
-    fn switch_endpoint_in_rack(
+    fn switch_component_in_rack(
         role: SwitchEndpointRole,
         mac: &str,
         rack_id: &str,
         switch_seed: u8,
         nvl_domain: &str,
-    ) -> Arc<BmcEndpoint> {
-        Arc::new(endpoint_with_creds(
-            BmcAddr {
-                ip: IpAddr::from_str("192.0.2.10").unwrap(),
-                port: Some(443),
-                mac: MacAddress::from_str(mac).unwrap(),
-            },
-            BmcCredentials::UsernamePassword {
-                username: "test".to_string(),
-                password: None,
-            },
-            Some(EndpointMetadata::Switch(SwitchData {
+    ) -> ComponentInventory {
+        ComponentInventory {
+            rack_id: RackId::new(rack_id),
+            bmc_mac: Some(MacAddress::from_str(mac).unwrap()),
+            metadata: EndpointMetadata::Switch(SwitchData {
                 id: Some(test_switch_id(switch_seed)),
                 serial: format!("switch-serial-{switch_seed}"),
                 slot_number: Some(9),
@@ -517,9 +506,8 @@ mod tests {
                 is_primary: role == SwitchEndpointRole::Host,
                 nmxc_enabled: role == SwitchEndpointRole::Host,
                 nmxt_enabled: false,
-            })),
-            Some(RackId::new(rack_id)),
-        ))
+            }),
+        }
     }
 
     fn rack() -> RackInventory {
@@ -584,7 +572,7 @@ mod tests {
             };
             metrics.reconcile_at(
                 &[rack],
-                &[switch_endpoint(
+                &[switch_component(
                     SwitchEndpointRole::Bmc,
                     "02:00:00:00:00:01",
                 )],
@@ -614,15 +602,17 @@ mod tests {
     }
 
     #[test]
-    fn reconciles_one_component_for_switch_bmc_and_host_endpoints() {
+    fn reconciles_duplicate_component_observations() {
         let registry = Registry::new();
         let mut metrics = InventoryMetrics::new(&registry, "carbide_hardware_health").unwrap();
-        let endpoints = vec![
-            switch_endpoint(SwitchEndpointRole::Host, "02:00:00:00:00:02"),
-            switch_endpoint(SwitchEndpointRole::Bmc, "02:00:00:00:00:01"),
+        let mut host_observation = switch_component(SwitchEndpointRole::Host, "02:00:00:00:00:02");
+        host_observation.bmc_mac = None;
+        let components = vec![
+            host_observation,
+            switch_component(SwitchEndpointRole::Bmc, "02:00:00:00:00:01"),
         ];
 
-        metrics.reconcile_at(&[rack()], &endpoints, 1_800_000_000.0);
+        metrics.reconcile_at(&[rack()], &components, 1_800_000_000.0);
 
         let output = exposition(&registry);
         for (name, help) in [
@@ -683,15 +673,15 @@ mod tests {
             rack_with_id("D09", 1_725_000_000),
             rack_with_id("D10", 1_725_000_100),
         ];
-        let endpoints = [
-            switch_endpoint_in_rack(
+        let components = [
+            switch_component_in_rack(
                 SwitchEndpointRole::Bmc,
                 "02:00:00:00:00:09",
                 "D09",
                 9,
                 domain,
             ),
-            switch_endpoint_in_rack(
+            switch_component_in_rack(
                 SwitchEndpointRole::Bmc,
                 "02:00:00:00:00:10",
                 "D10",
@@ -700,7 +690,7 @@ mod tests {
             ),
         ];
 
-        metrics.reconcile_at(&racks, &endpoints, 1_800_000_000.0);
+        metrics.reconcile_at(&racks, &components, 1_800_000_000.0);
 
         let output = exposition(&registry);
         let rack_domains = output
@@ -730,7 +720,7 @@ mod tests {
 
         metrics.reconcile_at(
             &[rack()],
-            &[switch_endpoint_in_rack(
+            &[switch_component_in_rack(
                 SwitchEndpointRole::Bmc,
                 "02:00:00:00:00:01",
                 "D09",
@@ -741,7 +731,7 @@ mod tests {
         );
         metrics.reconcile_at(
             &[rack()],
-            &[switch_endpoint_in_rack(
+            &[switch_component_in_rack(
                 SwitchEndpointRole::Bmc,
                 "02:00:00:00:00:01",
                 "D09",
@@ -760,15 +750,15 @@ mod tests {
     fn suppresses_conflicting_rack_domain_assignments() {
         let registry = Registry::new();
         let mut metrics = InventoryMetrics::new(&registry, "carbide_hardware_health").unwrap();
-        let endpoints = [
-            switch_endpoint_in_rack(
+        let components = [
+            switch_component_in_rack(
                 SwitchEndpointRole::Bmc,
                 "02:00:00:00:00:01",
                 "D09",
                 1,
                 "55555555-5555-5555-5555-555555555555",
             ),
-            switch_endpoint_in_rack(
+            switch_component_in_rack(
                 SwitchEndpointRole::Bmc,
                 "02:00:00:00:00:02",
                 "D09",
@@ -777,7 +767,7 @@ mod tests {
             ),
         ];
 
-        metrics.reconcile_at(&[rack()], &endpoints, 1_800_000_000.0);
+        metrics.reconcile_at(&[rack()], &components, 1_800_000_000.0);
 
         let output = exposition(&registry);
         assert!(!output.contains("carbide_hardware_health_rack_nvlink_domain_info{"));
@@ -787,9 +777,9 @@ mod tests {
     fn successful_reconciliation_removes_deleted_components() {
         let registry = Registry::new();
         let mut metrics = InventoryMetrics::new(&registry, "carbide_hardware_health").unwrap();
-        let endpoint = switch_endpoint(SwitchEndpointRole::Bmc, "02:00:00:00:00:01");
+        let component = switch_component(SwitchEndpointRole::Bmc, "02:00:00:00:00:01");
 
-        metrics.reconcile_at(&[rack()], &[endpoint], 1_800_000_000.0);
+        metrics.reconcile_at(&[rack()], &[component], 1_800_000_000.0);
         metrics.reconcile_at(&[rack()], &[], 1_800_000_030.0);
 
         let output = exposition(&registry);
@@ -801,12 +791,29 @@ mod tests {
     }
 
     #[test]
+    fn publishes_component_without_bmc_identity() {
+        let registry = Registry::new();
+        let mut metrics = InventoryMetrics::new(&registry, "carbide_hardware_health").unwrap();
+        let mut component = switch_component(SwitchEndpointRole::Bmc, "02:00:00:00:00:01");
+        component.bmc_mac = None;
+
+        metrics.reconcile_at(&[rack()], &[component], 1_800_000_000.0);
+
+        let output = exposition(&registry);
+        let component_line = output
+            .lines()
+            .find(|line| line.starts_with("carbide_hardware_health_component_inventory_info{"))
+            .expect("component inventory series");
+        assert!(component_line.contains("bmc_mac=\"\""));
+    }
+
+    #[test]
     fn unreconciled_refresh_retains_last_successful_snapshot() {
         let registry = Registry::new();
         let mut metrics = InventoryMetrics::new(&registry, "carbide_hardware_health").unwrap();
-        let endpoint = switch_endpoint(SwitchEndpointRole::Bmc, "02:00:00:00:00:01");
+        let component = switch_component(SwitchEndpointRole::Bmc, "02:00:00:00:00:01");
 
-        metrics.reconcile_at(&[rack()], &[endpoint], 1_800_000_000.0);
+        metrics.reconcile_at(&[rack()], &[component], 1_800_000_000.0);
 
         let output = exposition(&registry);
         assert!(output.contains("carbide_hardware_health_component_inventory_info{"));

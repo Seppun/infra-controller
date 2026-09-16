@@ -43,9 +43,9 @@ use crate::bmc::{
     bmc_latency_endpoint_labels,
 };
 use crate::endpoint::{
-    BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSnapshot, EndpointSource,
-    InventorySnapshot, MachineData, PowerShelfData, RackInventory, SharedSystemUuid, SwitchData,
-    SwitchEndpointRole,
+    BmcAddr, BmcCredentials, BmcEndpoint, ComponentInventory, EndpointMetadata, EndpointSnapshot,
+    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, RackInventory,
+    SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
 
@@ -291,14 +291,31 @@ fn switch_endpoint_metadata(
     endpoint_role: SwitchEndpointRole,
     nmxt_enabled: bool,
 ) -> Result<EndpointMetadata, HealthError> {
-    let config = switch
+    if switch.config.is_none() {
+        return Err(HealthError::GenericError(
+            "switch endpoint does not have serial".into(),
+        ));
+    }
+
+    Ok(EndpointMetadata::Switch(switch_data(
+        switch,
+        endpoint_role,
+        nmxt_enabled,
+    )))
+}
+
+fn switch_data(
+    switch: &rpc::forge::Switch,
+    endpoint_role: SwitchEndpointRole,
+    nmxt_enabled: bool,
+) -> SwitchData {
+    let serial = switch
         .config
         .as_ref()
-        .ok_or_else(|| HealthError::GenericError("switch endpoint does not have serial".into()))?;
+        .map(|config| config.name.clone())
+        .unwrap_or_default();
 
-    let serial = config.name.clone();
-
-    Ok(EndpointMetadata::Switch(SwitchData {
+    SwitchData {
         id: switch.id,
         serial,
         slot_number: switch
@@ -314,9 +331,123 @@ fn switch_endpoint_metadata(
             .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
         endpoint_role,
         is_primary: switch.is_primary,
-        nmxc_enabled: config.enable_nmxc || switch.is_primary,
+        nmxc_enabled: switch
+            .config
+            .as_ref()
+            .is_some_and(|config| config.enable_nmxc)
+            || switch.is_primary,
         nmxt_enabled,
+    }
+}
+
+fn machine_data(machine: &rpc::forge::Machine) -> MachineData {
+    MachineData {
+        machine_id: machine.id,
+        machine_serial: machine
+            .discovery_info
+            .as_ref()
+            .and_then(|info| info.dmi_data.as_ref())
+            .map(|dmi| dmi.chassis_serial.clone()),
+        system_uuid: SharedSystemUuid::default(),
+        slot_number: machine
+            .placement_in_rack
+            .as_ref()
+            .and_then(|placement| placement.slot_number),
+        tray_index: machine
+            .placement_in_rack
+            .as_ref()
+            .and_then(|placement| placement.tray_index),
+        nvlink_domain_uuid: machine
+            .nvlink_info
+            .as_ref()
+            .and_then(|info| info.domain_uuid),
+        driver_version: unique_gpu_driver_version(machine.discovery_info.as_ref()),
+    }
+}
+
+fn inventory_bmc_mac(bmc_info: Option<&rpc::forge::BmcInfo>) -> Option<MacAddress> {
+    bmc_info
+        .and_then(|info| info.mac.as_deref())
+        .and_then(|mac| MacAddress::from_str(mac).ok())
+}
+
+fn machine_component_inventory(
+    machine: &rpc::forge::Machine,
+) -> Result<Option<ComponentInventory>, HealthError> {
+    let Some(rack_id) = machine.rack_id.clone() else {
+        return Ok(None);
+    };
+    let machine_id = machine.id.ok_or_else(|| {
+        HealthError::GenericError(format!(
+            "machine assigned to rack {rack_id} is missing its component ID"
+        ))
+    })?;
+
+    Ok(Some(ComponentInventory {
+        rack_id,
+        metadata: EndpointMetadata::Machine(MachineData {
+            machine_id: Some(machine_id),
+            ..machine_data(machine)
+        }),
+        bmc_mac: inventory_bmc_mac(machine.bmc_info.as_ref()),
     }))
+}
+
+fn switch_component_inventory(
+    switch: &rpc::forge::Switch,
+) -> Result<Option<ComponentInventory>, HealthError> {
+    let Some(rack_id) = switch.rack_id.clone() else {
+        return Ok(None);
+    };
+    let switch_id = switch.id.ok_or_else(|| {
+        HealthError::GenericError(format!(
+            "switch assigned to rack {rack_id} is missing its component ID"
+        ))
+    })?;
+
+    Ok(Some(ComponentInventory {
+        rack_id,
+        metadata: EndpointMetadata::Switch(SwitchData {
+            id: Some(switch_id),
+            ..switch_data(switch, SwitchEndpointRole::Bmc, false)
+        }),
+        bmc_mac: inventory_bmc_mac(switch.bmc_info.as_ref()),
+    }))
+}
+
+fn power_shelf_component_inventory(
+    power_shelf: &rpc::forge::PowerShelf,
+) -> Result<Option<ComponentInventory>, HealthError> {
+    let Some(rack_id) = power_shelf.rack_id.clone() else {
+        return Ok(None);
+    };
+    let power_shelf_id = power_shelf.id.ok_or_else(|| {
+        HealthError::GenericError(format!(
+            "power shelf assigned to rack {rack_id} is missing its component ID"
+        ))
+    })?;
+
+    Ok(Some(ComponentInventory {
+        rack_id,
+        metadata: EndpointMetadata::PowerShelf(PowerShelfData {
+            id: Some(power_shelf_id),
+            serial: None,
+        }),
+        bmc_mac: inventory_bmc_mac(power_shelf.bmc_info.as_ref()),
+    }))
+}
+
+fn include_component_inventory(
+    result: Result<Option<ComponentInventory>, HealthError>,
+    components: &mut Vec<ComponentInventory>,
+    inventory_error: &mut Option<HealthError>,
+) {
+    match result {
+        Ok(Some(component)) => components.push(component),
+        Ok(None) => {}
+        Err(error) if inventory_error.is_none() => *inventory_error = Some(error),
+        Err(_) => {}
+    }
 }
 
 pub struct ApiEndpointSource {
@@ -338,6 +469,7 @@ struct CachedBmcClient {
 
 struct ComponentEndpointFetch {
     endpoints: Vec<Arc<BmcEndpoint>>,
+    components: Vec<ComponentInventory>,
     inventory_error: Option<HealthError>,
 }
 
@@ -391,18 +523,33 @@ impl ApiEndpointSource {
     }
 
     async fn fetch_component_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
-        let mut endpoints = self.fetch_machine_endpoints().await?;
-        let mut inventory_error = None;
+        let ComponentEndpointFetch {
+            mut endpoints,
+            mut components,
+            mut inventory_error,
+        } = self.fetch_machine_endpoints().await?;
 
         match self.fetch_power_shelf_endpoints().await {
-            Ok(power_shelves) => endpoints.extend(power_shelves),
+            Ok(power_shelves) => {
+                endpoints.extend(power_shelves.endpoints);
+                components.extend(power_shelves.components);
+                if inventory_error.is_none() {
+                    inventory_error = power_shelves.inventory_error;
+                }
+            }
             Err(error) => {
                 tracing::warn!(?error, "Failed to fetch power shelf endpoints");
                 inventory_error = Some(error);
             }
         }
         match self.fetch_switch_endpoints().await {
-            Ok(switches) => endpoints.extend(switches),
+            Ok(switches) => {
+                endpoints.extend(switches.endpoints);
+                components.extend(switches.components);
+                if inventory_error.is_none() {
+                    inventory_error = switches.inventory_error;
+                }
+            }
             Err(error) => {
                 tracing::warn!(?error, "Failed to fetch switch endpoints");
                 if inventory_error.is_none() {
@@ -417,6 +564,7 @@ impl ApiEndpointSource {
 
         Ok(ComponentEndpointFetch {
             endpoints,
+            components,
             inventory_error,
         })
     }
@@ -452,20 +600,31 @@ impl ApiEndpointSource {
                 .find_racks_by_ids(rack_ids.to_vec())
                 .await
                 .map_err(HealthError::ApiInvocationError)?;
+            if racks.racks.len() != rack_ids.len() {
+                return Err(HealthError::GenericError(format!(
+                    "rack inventory response returned {} of {} requested racks",
+                    racks.racks.len(),
+                    rack_ids.len()
+                )));
+            }
 
-            inventory.extend(racks.racks.into_iter().filter_map(|rack| {
-                let rack_id = rack.id?;
+            for rack in racks.racks {
+                let rack_id = rack.id.ok_or_else(|| {
+                    HealthError::GenericError(
+                        "rack inventory response contains a rack without an ID".to_string(),
+                    )
+                })?;
                 let (created_seconds, created_nanos) = rack
                     .created
                     .map(|created| (Some(created.seconds), Some(created.nanos)))
                     .unwrap_or((None, None));
 
-                Some(RackInventory {
+                inventory.push(RackInventory {
                     rack_id,
                     created_seconds,
                     created_nanos,
-                })
-            }));
+                });
+            }
         }
 
         Ok(inventory)
@@ -474,17 +633,16 @@ impl ApiEndpointSource {
     async fn fetch_endpoint_snapshot(&self) -> Result<EndpointSnapshot, HealthError> {
         let ComponentEndpointFetch {
             endpoints,
+            components,
             inventory_error,
         } = self.fetch_component_endpoints().await?;
 
         let inventory = match inventory_error {
             Some(error) => Err(error),
-            None => self.fetch_rack_inventory().await.map(|racks| {
-                Some(InventorySnapshot {
-                    racks,
-                    endpoints: endpoints.clone(),
-                })
-            }),
+            None => self
+                .fetch_rack_inventory()
+                .await
+                .map(|racks| Some(InventorySnapshot { racks, components })),
         };
 
         Ok(EndpointSnapshot {
@@ -508,7 +666,7 @@ impl ApiEndpointSource {
         }
     }
 
-    async fn fetch_machine_endpoints(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
+    async fn fetch_machine_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
         let machine_ids = self
             .api
             .client
@@ -525,6 +683,8 @@ impl ApiEndpointSource {
         );
 
         let mut endpoints = Vec::new();
+        let mut components = Vec::new();
+        let mut inventory_error = None;
 
         // Page by id count, but keep each reply well under tonic's 4 MiB receive
         // limit: a page of 100 machines has exceeded it in the field at about
@@ -546,8 +706,20 @@ impl ApiEndpointSource {
                 requested_machine_count = ids_chunk.len(),
                 "Fetched machine details"
             );
+            if machines.machines.len() != ids_chunk.len() && inventory_error.is_none() {
+                inventory_error = Some(HealthError::GenericError(format!(
+                    "machine inventory response returned {} of {} requested components",
+                    machines.machines.len(),
+                    ids_chunk.len()
+                )));
+            }
 
             for machine in machines.machines {
+                include_component_inventory(
+                    machine_component_inventory(&machine),
+                    &mut components,
+                    &mut inventory_error,
+                );
                 match self.extract_machine_endpoint(&machine) {
                     Ok(endpoint) => endpoints.push(endpoint),
                     Err(error) => tracing::warn!(
@@ -560,10 +732,14 @@ impl ApiEndpointSource {
             }
         }
 
-        Ok(endpoints)
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
     }
 
-    async fn fetch_switch_endpoints(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
+    async fn fetch_switch_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
         let switch_request = rpc::forge::SwitchQuery {
             name: None,
             switch_id: None,
@@ -576,8 +752,15 @@ impl ApiEndpointSource {
             .await
             .map_err(HealthError::ApiInvocationError)?;
         let mut endpoints = Vec::new();
+        let mut components = Vec::new();
+        let mut inventory_error = None;
 
         for switch in response.switches {
+            include_component_inventory(
+                switch_component_inventory(&switch),
+                &mut components,
+                &mut inventory_error,
+            );
             match self.extract_switch_endpoint(&switch) {
                 Ok(endpoint) => endpoints.push(endpoint),
                 Err(error) => tracing::warn!(
@@ -604,10 +787,14 @@ impl ApiEndpointSource {
             switch_endpoint_count = endpoints.len(),
             "Fetched switch endpoints"
         );
-        Ok(endpoints)
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
     }
 
-    async fn fetch_power_shelf_endpoints(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
+    async fn fetch_power_shelf_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
         let request = rpc::forge::PowerShelfQuery {
             name: None,
             power_shelf_id: None,
@@ -620,8 +807,15 @@ impl ApiEndpointSource {
             .await
             .map_err(HealthError::ApiInvocationError)?;
         let mut endpoints = Vec::new();
+        let mut components = Vec::new();
+        let mut inventory_error = None;
 
         for power_shelf in response.power_shelves {
+            include_component_inventory(
+                power_shelf_component_inventory(&power_shelf),
+                &mut components,
+                &mut inventory_error,
+            );
             match self.extract_power_shelf_endpoint(&power_shelf) {
                 Ok(endpoint) => endpoints.push(endpoint),
                 Err(error) => tracing::warn!(
@@ -637,7 +831,11 @@ impl ApiEndpointSource {
             power_shelf_endpoint_count = endpoints.len(),
             "Fetched power shelf endpoints"
         );
-        Ok(endpoints)
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
     }
 
     fn extract_machine_endpoint(
@@ -650,30 +848,9 @@ impl ApiEndpointSource {
             ));
         };
         let addr = BmcAddr::try_from(bmc_info)?;
-        let metadata = machine.id.map(|machine_id| {
-            EndpointMetadata::Machine(MachineData {
-                machine_id: Some(machine_id),
-                machine_serial: machine
-                    .discovery_info
-                    .as_ref()
-                    .and_then(|info| info.dmi_data.as_ref())
-                    .map(|dmi| dmi.chassis_serial.clone()),
-                system_uuid: SharedSystemUuid::default(),
-                slot_number: machine
-                    .placement_in_rack
-                    .as_ref()
-                    .and_then(|placement| placement.slot_number),
-                tray_index: machine
-                    .placement_in_rack
-                    .as_ref()
-                    .and_then(|placement| placement.tray_index),
-                nvlink_domain_uuid: machine
-                    .nvlink_info
-                    .as_ref()
-                    .and_then(|info| info.domain_uuid),
-                driver_version: unique_gpu_driver_version(machine.discovery_info.as_ref()),
-            })
-        });
+        let metadata = machine
+            .id
+            .map(|_| EndpointMetadata::Machine(machine_data(machine)));
 
         self.endpoint_for(
             addr,
@@ -936,7 +1113,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use carbide_test_support::{Check, check_values, value_scenarios};
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
     use carbide_uuid::nvlink::NvLinkDomainId;
+    use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use nv_redfish::bmc_http::reqwest::ClientParams as ReqwestClientParams;
 
@@ -962,6 +1141,18 @@ mod tests {
 
     fn test_switch_id() -> SwitchId {
         SwitchId::new(SwitchIdSource::Tpm, [7u8; 32], SwitchType::NvLink)
+    }
+
+    fn test_machine_id() -> MachineId {
+        MachineId::new(MachineIdSource::Tpm, [8u8; 32], MachineType::Host)
+    }
+
+    fn test_power_shelf_id() -> PowerShelfId {
+        PowerShelfId::new(
+            PowerShelfIdSource::ProductBoardChassisSerial,
+            [9u8; 32],
+            PowerShelfType::Rack,
+        )
     }
 
     fn make_test_client(_kind: ApiCredentialKind) -> Result<Arc<BmcClient>, HealthError> {
@@ -1054,6 +1245,75 @@ mod tests {
                 effective_find_by_ids_page_size(preferred, advertised_max)
             },
         );
+    }
+
+    #[test]
+    fn authoritative_component_inventory_does_not_require_bmc_endpoint() {
+        let rack_id = RackId::new("RACK_1");
+        let machine = machine_component_inventory(&rpc::forge::Machine {
+            id: Some(test_machine_id()),
+            rack_id: Some(rack_id.clone()),
+            bmc_info: Some(rpc::forge::BmcInfo {
+                mac: Some("not-a-mac".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let switch = switch_component_inventory(&rpc::forge::Switch {
+            id: Some(test_switch_id()),
+            rack_id: Some(rack_id.clone()),
+            bmc_info: None,
+            is_primary: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let power_shelf = power_shelf_component_inventory(&rpc::forge::PowerShelf {
+            id: Some(test_power_shelf_id()),
+            rack_id: Some(rack_id),
+            bmc_info: None,
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+
+        assert!(machine.bmc_mac.is_none());
+        assert!(switch.bmc_mac.is_none());
+        assert!(power_shelf.bmc_mac.is_none());
+        assert!(matches!(machine.metadata, EndpointMetadata::Machine(_)));
+        assert!(matches!(switch.metadata, EndpointMetadata::Switch(_)));
+        assert!(matches!(
+            power_shelf.metadata,
+            EndpointMetadata::PowerShelf(_)
+        ));
+    }
+
+    #[test]
+    fn missing_racked_component_identity_rejects_inventory_snapshot() {
+        let rack_id = RackId::new("RACK_1");
+        let errors = [
+            machine_component_inventory(&rpc::forge::Machine {
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            })
+            .unwrap_err(),
+            switch_component_inventory(&rpc::forge::Switch {
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            })
+            .unwrap_err(),
+            power_shelf_component_inventory(&rpc::forge::PowerShelf {
+                rack_id: Some(rack_id),
+                ..Default::default()
+            })
+            .unwrap_err(),
+        ];
+
+        for error in errors {
+            assert!(error.to_string().contains("missing its component ID"));
+        }
     }
 
     #[test]

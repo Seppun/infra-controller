@@ -310,7 +310,7 @@ impl EndpointSource for CompositeEndpointSource {
     fn fetch_snapshot<'a>(&'a self) -> BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
         Box::pin(async move {
             let mut endpoints = Vec::new();
-            let mut inventory_endpoints = Vec::new();
+            let mut components = Vec::new();
             let mut racks = Vec::new();
             let mut authoritative_source_found = false;
             let mut inventory_error = None;
@@ -323,7 +323,7 @@ impl EndpointSource for CompositeEndpointSource {
                     Ok(Some(mut snapshot)) => {
                         authoritative_source_found = true;
                         racks.append(&mut snapshot.racks);
-                        inventory_endpoints.append(&mut snapshot.endpoints);
+                        components.append(&mut snapshot.components);
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -335,13 +335,12 @@ impl EndpointSource for CompositeEndpointSource {
                 }
             }
 
-            let inventory = match inventory_error {
-                Some(error) => Err(error),
-                None => Ok(authoritative_source_found.then_some(InventorySnapshot {
-                    racks,
-                    endpoints: inventory_endpoints,
-                })),
-            };
+            let inventory =
+                match inventory_error {
+                    Some(error) => Err(error),
+                    None => Ok(authoritative_source_found
+                        .then_some(InventorySnapshot { racks, components })),
+                };
 
             Ok(EndpointSnapshot {
                 endpoints,
@@ -362,6 +361,7 @@ mod tests {
         StaticBmcEndpoint, StaticMachineEndpoint, StaticPowerShelfEndpoint, StaticSwitchEndpoint,
         StaticSwitchEndpointRole,
     };
+    use crate::endpoint::ComponentInventory;
 
     fn reqwest() -> ReqwestClient {
         ReqwestClient::with_params(ReqwestClientParams::new().accept_invalid_certs(true))
@@ -722,6 +722,7 @@ mod tests {
 
     struct AuthoritativeSource {
         endpoints: Vec<Arc<BmcEndpoint>>,
+        components: Vec<ComponentInventory>,
         inventory_fails: bool,
     }
 
@@ -741,7 +742,7 @@ mod tests {
                 } else {
                     Ok(Some(InventorySnapshot {
                         racks: Vec::new(),
-                        endpoints: self.endpoints.clone(),
+                        components: self.components.clone(),
                     }))
                 };
                 Ok(EndpointSnapshot {
@@ -774,8 +775,17 @@ mod tests {
         let auxiliary_endpoint = Arc::new(super::super::test_support::test_endpoint(
             MacAddress::from_str("00:11:22:33:44:66").unwrap(),
         ));
+        let component = ComponentInventory {
+            rack_id: RackId::new("RACK_1"),
+            metadata: EndpointMetadata::PowerShelf(PowerShelfData {
+                id: Some(test_power_shelf_id("power-shelf-a")),
+                serial: None,
+            }),
+            bmc_mac: Some(MacAddress::from_str("00:11:22:33:44:55").unwrap()),
+        };
         let authoritative = Arc::new(AuthoritativeSource {
             endpoints: vec![authoritative_endpoint.clone()],
+            components: vec![component.clone()],
             inventory_fails: false,
         });
         let auxiliary = Arc::new(StaticEndpointSource::new(vec![
@@ -787,11 +797,7 @@ mod tests {
         let inventory = snapshot.inventory.unwrap().unwrap();
 
         assert_eq!(snapshot.endpoints.len(), 2);
-        assert_eq!(inventory.endpoints.len(), 1);
-        assert!(Arc::ptr_eq(
-            &inventory.endpoints[0],
-            &authoritative_endpoint
-        ));
+        assert_eq!(inventory.components, vec![component]);
     }
 
     #[tokio::test]
@@ -801,6 +807,7 @@ mod tests {
         ));
         let authoritative = Arc::new(AuthoritativeSource {
             endpoints: vec![endpoint],
+            components: Vec::new(),
             inventory_fails: true,
         });
         let composite = CompositeEndpointSource::new(vec![authoritative]);

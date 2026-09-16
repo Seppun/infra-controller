@@ -102,13 +102,13 @@ pub async fn run_discovery_iteration(
                 .into_iter()
                 .filter(|rack| shard_manager.should_monitor_key(rack.rack_id.as_ref()))
                 .collect::<Vec<_>>();
-            let sharded_inventory_endpoints = inventory
-                .endpoints
+            let sharded_inventory_components = inventory
+                .components
                 .into_iter()
-                .filter(|endpoint| shard_manager.should_monitor(endpoint))
+                .filter(|component| shard_manager.should_monitor_key(component.rack_id.as_ref()))
                 .collect::<Vec<_>>();
             ctx.inventory_metrics
-                .reconcile(&sharded_racks, &sharded_inventory_endpoints);
+                .reconcile(&sharded_racks, &sharded_inventory_components);
         }
         Ok(None) => {}
         Err(error) => {
