@@ -282,6 +282,11 @@ func TestNetworkCapabilityDeviceType(t *testing.T) {
 			want:       cdbm.MachineCapabilityDeviceTypeDPU,
 		},
 		{
+			name:       "SpectrumX device type",
+			deviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X.Enum(),
+			want:       cdbm.MachineCapabilityDeviceTypeSpectrumX,
+		},
+		{
 			name:        "unsupported device type",
 			deviceType:  corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK.Enum(),
 			wantWarning: true,

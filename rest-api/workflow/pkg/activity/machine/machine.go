@@ -794,52 +794,47 @@ func normalizeMachineInterfaceIPAddresses(addresses []string) []string {
 	return addresses
 }
 
-// networkCapabilityDeviceType maps a wire device type onto the stored value for
-// a Network capability. UNKNOWN is the enum's defined "unspecified" sentinel, so
-// it stores empty silently just as an omitted field does; the explicit `default`
-// branch is preserved so genuine schema drift is still surfaced.
-// TODO: support other Network device-type variants as the wire enum grows;
-// currently only DPU and SpectrumX are recognized.
-func networkCapabilityDeviceType(logger zerolog.Logger, deviceType *corev1.MachineCapabilityDeviceType) *cdbm.MachineCapabilityDeviceType {
+// capabilityDeviceType converts a wire device type for one capability
+// kind. The proto-to-domain mapping, including the `UNKNOWN` sentinel,
+// lives on `MachineCapabilityDeviceType.FromProto`; this adds only the
+// per-capability rule that a device type valid for another capability
+// kind is not accepted here, and warns when one appears.
+func capabilityDeviceType(
+	logger zerolog.Logger,
+	deviceType *corev1.MachineCapabilityDeviceType,
+	message string,
+	supported ...cdbm.MachineCapabilityDeviceType,
+) *cdbm.MachineCapabilityDeviceType {
 	result := cdbm.MachineCapabilityDeviceType("")
 	if deviceType == nil {
 		return &result
 	}
 
-	switch *deviceType {
-	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
-		// Defined sentinel for "unspecified": store empty without warning.
-	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
-		result = cdbm.MachineCapabilityDeviceTypeDPU
-	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X:
-		result = cdbm.MachineCapabilityDeviceTypeSpectrumX
-	default:
-		logger.Warn().Str("DeviceType", deviceType.String()).Msg("unsupported MachineCapabilityDeviceType for Network capability; defaulting to empty")
+	result.FromProto(*deviceType)
+	if result != "" && !slices.Contains(supported, result) {
+		logger.Warn().Str("DeviceType", deviceType.String()).Msg(message)
+		result = ""
 	}
 
 	return &result
 }
 
-// gpuCapabilityDeviceType maps a wire device type onto the stored value for a
-// GPU capability, on the same terms as networkCapabilityDeviceType.
-// TODO: support other GPU device-type variants as the wire enum grows;
-// currently only NVLink is recognized.
+// networkCapabilityDeviceType converts a wire device type for a Network
+// capability, where DPU and SpectrumX are recognized.
+// TODO: support other Network device-type variants as the wire enum grows.
+func networkCapabilityDeviceType(logger zerolog.Logger, deviceType *corev1.MachineCapabilityDeviceType) *cdbm.MachineCapabilityDeviceType {
+	return capabilityDeviceType(logger, deviceType,
+		"unsupported MachineCapabilityDeviceType for Network capability; defaulting to empty",
+		cdbm.MachineCapabilityDeviceTypeDPU, cdbm.MachineCapabilityDeviceTypeSpectrumX)
+}
+
+// gpuCapabilityDeviceType converts a wire device type for a GPU
+// capability, where only NVLink is recognized.
+// TODO: support other GPU device-type variants as the wire enum grows.
 func gpuCapabilityDeviceType(logger zerolog.Logger, deviceType *corev1.MachineCapabilityDeviceType) *cdbm.MachineCapabilityDeviceType {
-	result := cdbm.MachineCapabilityDeviceType("")
-	if deviceType == nil {
-		return &result
-	}
-
-	switch *deviceType {
-	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
-		// Defined sentinel for "unspecified": store empty without warning.
-	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK:
-		result = cdbm.MachineCapabilityDeviceTypeNVLink
-	default:
-		logger.Warn().Str("DeviceType", deviceType.String()).Msg("unsupported MachineCapabilityDeviceType for GPU capability; defaulting to empty")
-	}
-
-	return &result
+	return capabilityDeviceType(logger, deviceType,
+		"unsupported MachineCapabilityDeviceType for GPU capability; defaulting to empty",
+		cdbm.MachineCapabilityDeviceTypeNVLink)
 }
 
 // Utility function to parse discovery data and create/update Machine Capability records
