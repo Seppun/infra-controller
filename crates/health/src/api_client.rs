@@ -44,7 +44,7 @@ use crate::bmc::{
 };
 use crate::endpoint::{
     BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSource, MachineData,
-    PowerShelfData, SharedSystemUuid, SwitchData, SwitchEndpointRole,
+    PowerShelfData, RackInventory, SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
 
@@ -382,6 +382,42 @@ impl ApiEndpointSource {
         tracing::info!(endpoint_count = endpoints.len(), "Prepared endpoints");
 
         Ok(endpoints)
+    }
+
+    async fn fetch_rack_inventory(&self) -> Result<Vec<RackInventory>, HealthError> {
+        let rack_ids = self
+            .api
+            .client
+            .find_rack_ids(rpc::forge::RackSearchFilter::default())
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .rack_ids;
+
+        let mut inventory = Vec::with_capacity(rack_ids.len());
+        for rack_ids in rack_ids.chunks(100) {
+            let racks = self
+                .api
+                .client
+                .find_racks_by_ids(rack_ids.to_vec())
+                .await
+                .map_err(HealthError::ApiInvocationError)?;
+
+            inventory.extend(racks.racks.into_iter().filter_map(|rack| {
+                let rack_id = rack.id?;
+                let (created_seconds, created_nanos) = rack
+                    .created
+                    .map(|created| (Some(created.seconds), Some(created.nanos)))
+                    .unwrap_or((None, None));
+
+                Some(RackInventory {
+                    rack_id,
+                    created_seconds,
+                    created_nanos,
+                })
+            }));
+        }
+
+        Ok(inventory)
     }
 
     fn prune_bmc_client_cache(&self, live_endpoints: &[Arc<BmcEndpoint>]) {
@@ -747,6 +783,12 @@ fn unique_gpu_driver_version(
 impl EndpointSource for ApiEndpointSource {
     fn fetch_bmc_hosts<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
         Box::pin(self.fetch_bmc_hosts())
+    }
+
+    fn fetch_rack_inventory<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<Vec<RackInventory>>, HealthError>> {
+        Box::pin(async move { self.fetch_rack_inventory().await.map(Some) })
     }
 }
 

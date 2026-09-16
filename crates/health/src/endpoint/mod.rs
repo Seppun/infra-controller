@@ -22,7 +22,7 @@ mod sources;
 pub use cluster::ClusterEndpointSource;
 pub use model::{
     BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSource, MachineData,
-    PowerShelfData, SharedSystemUuid, SwitchData, SwitchEndpointRole,
+    PowerShelfData, RackInventory, SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 pub use sources::{CompositeEndpointSource, StaticEndpointSource};
 

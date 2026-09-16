@@ -33,7 +33,7 @@ use crate::bmc::{
 use crate::config::{StaticBmcEndpoint, StaticSwitchEndpointRole};
 use crate::endpoint::{
     BmcAddr, BmcCredentials, BmcEndpoint, BoxFuture, EndpointMetadata, EndpointSource, MachineData,
-    PowerShelfData, SharedSystemUuid, SwitchData, SwitchEndpointRole,
+    PowerShelfData, RackInventory, SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
 
@@ -303,6 +303,24 @@ impl EndpointSource for CompositeEndpointSource {
             }
 
             Ok(all)
+        })
+    }
+
+    fn fetch_rack_inventory<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<Vec<RackInventory>>, HealthError>> {
+        Box::pin(async move {
+            let mut all = Vec::new();
+            let mut authoritative_source_found = false;
+
+            for source in &self.sources {
+                if let Some(mut racks) = source.fetch_rack_inventory().await? {
+                    authoritative_source_found = true;
+                    all.append(&mut racks);
+                }
+            }
+
+            Ok(authoritative_source_found.then_some(all))
         })
     }
 }

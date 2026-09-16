@@ -91,6 +91,25 @@ pub async fn run_discovery_iteration(
         .cloned()
         .collect();
 
+    match endpoint_source.fetch_rack_inventory().await {
+        Ok(Some(racks)) => {
+            let sharded_racks = racks
+                .into_iter()
+                .filter(|rack| shard_manager.should_monitor_key(rack.rack_id.as_ref()))
+                .collect::<Vec<_>>();
+            ctx.inventory_metrics
+                .reconcile(&sharded_racks, &sharded_endpoints);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            ctx.inventory_metrics.record_refresh_failure();
+            tracing::warn!(
+                ?error,
+                "Could not refresh NICo rack inventory; retaining previous Prometheus snapshot"
+            );
+        }
+    }
+
     // Resolve machine identity before collectors start when possible. Shared
     // write-once state propagates the result to running collectors and caches
     // both present and absent UUIDs, preventing repeated successful BMC queries.

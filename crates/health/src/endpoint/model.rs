@@ -81,6 +81,18 @@ pub struct BmcEndpoint {
     pub bmc: Arc<BmcClient>,
 }
 
+/// Authoritative rack lifecycle metadata returned by NICo discovery.
+///
+/// `created_seconds` and `created_nanos` identify the rack-ingestion session used
+/// by the Rack Health Prometheus contract. They remain optional so older or
+/// non-NICo endpoint sources can decline to publish session-scoped inventory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RackInventory {
+    pub rack_id: RackId,
+    pub created_seconds: Option<i64>,
+    pub created_nanos: Option<i32>,
+}
+
 impl BmcEndpoint {
     pub fn key(&self) -> String {
         self.addr.mac.to_string()
@@ -318,6 +330,16 @@ impl From<BmcCredentials> for nv_redfish::bmc_http::BmcCredentials {
 
 pub trait EndpointSource: Send + Sync {
     fn fetch_bmc_hosts<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>>;
+
+    /// Returns rack lifecycle metadata when this source is backed by NICo.
+    ///
+    /// `None` means the source cannot provide authoritative rack sessions; an
+    /// empty vector means a successful NICo query found no racks.
+    fn fetch_rack_inventory<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<Vec<RackInventory>>, HealthError>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 #[cfg(test)]
