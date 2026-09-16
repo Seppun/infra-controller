@@ -59,38 +59,45 @@ pub(crate) struct InventoryRefreshFailed {
 struct RackSeries {
     rack_id: String,
     session_id: String,
-    created_seconds: i64,
-    created_nanos: i32,
+    created: Option<(i64, i32)>,
 }
 
 impl RackSeries {
-    fn from_inventory(rack: &RackInventory) -> Option<Self> {
-        let created_seconds = rack.created_seconds?;
-        let created_nanos = rack.created_nanos?;
-        if !(0..1_000_000_000).contains(&created_nanos) {
-            tracing::warn!(
-                rack_id = %rack.rack_id,
-                created_nanos,
-                "Skipping rack inventory with an invalid creation timestamp"
-            );
-            return None;
-        }
-
+    fn from_inventory(rack: &RackInventory) -> Self {
         let rack_id = rack.rack_id.to_string();
-        Some(Self {
-            session_id: format!("{rack_id}:{created_seconds}.{created_nanos:09}"),
+        let created = match (rack.created_seconds, rack.created_nanos) {
+            (Some(seconds), Some(nanos)) if (0..1_000_000_000).contains(&nanos) => {
+                Some((seconds, nanos))
+            }
+            _ => {
+                tracing::warn!(
+                    rack_id = %rack.rack_id,
+                    created_seconds = ?rack.created_seconds,
+                    created_nanos = ?rack.created_nanos,
+                    "Using degraded rack inventory session identity because the creation timestamp is unavailable or invalid"
+                );
+                None
+            }
+        };
+        let session_id = created.map_or_else(
+            || format!("{rack_id}:unknown"),
+            |(seconds, nanos)| format!("{rack_id}:{seconds}.{nanos:09}"),
+        );
+
+        Self {
             rack_id,
-            created_seconds,
-            created_nanos,
-        })
+            session_id,
+            created,
+        }
     }
 
     fn label_values(&self) -> [&str; 2] {
         [&self.rack_id, &self.session_id]
     }
 
-    fn start_time_seconds(&self) -> f64 {
-        self.created_seconds as f64 + f64::from(self.created_nanos) / 1_000_000_000.0
+    fn start_time_seconds(&self) -> Option<f64> {
+        self.created
+            .map(|(seconds, nanos)| seconds as f64 + f64::from(nanos) / 1_000_000_000.0)
     }
 }
 
@@ -335,7 +342,7 @@ impl InventoryMetrics {
     ) {
         let desired_racks = racks
             .iter()
-            .filter_map(RackSeries::from_inventory)
+            .map(RackSeries::from_inventory)
             .collect::<BTreeSet<_>>();
         let racks_by_id = desired_racks
             .iter()
@@ -427,17 +434,20 @@ impl InventoryMetrics {
         }
 
         for stale in self.current_racks.difference(&desired_racks) {
-            if let Err(error) = self
-                .rack_session_start_time_seconds
-                .remove_label_values(&stale.label_values())
+            if stale.created.is_some()
+                && let Err(error) = self
+                    .rack_session_start_time_seconds
+                    .remove_label_values(&stale.label_values())
             {
                 tracing::warn!(?error, "Could not remove stale rack-session metric");
             }
         }
         for rack in &desired_racks {
-            self.rack_session_start_time_seconds
-                .with_label_values(&rack.label_values())
-                .set(rack.start_time_seconds());
+            if let Some(start_time_seconds) = rack.start_time_seconds() {
+                self.rack_session_start_time_seconds
+                    .with_label_values(&rack.label_values())
+                    .set(start_time_seconds);
+            }
         }
 
         self.current_components = desired_components;
@@ -530,6 +540,77 @@ mod tests {
             .encode(&registry.gather(), &mut bytes)
             .unwrap();
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn rack_timestamp_quality_controls_only_session_start_metric() {
+        struct Case {
+            scenario: &'static str,
+            created_seconds: Option<i64>,
+            created_nanos: Option<i32>,
+            expected_session_id: &'static str,
+            expects_session_start: bool,
+        }
+
+        for case in [
+            Case {
+                scenario: "valid timestamp",
+                created_seconds: Some(1_725_000_000),
+                created_nanos: Some(123_000_000),
+                expected_session_id: "D09:1725000000.123000000",
+                expects_session_start: true,
+            },
+            Case {
+                scenario: "missing timestamp",
+                created_seconds: None,
+                created_nanos: None,
+                expected_session_id: "D09:unknown",
+                expects_session_start: false,
+            },
+            Case {
+                scenario: "invalid nanoseconds",
+                created_seconds: Some(1_725_000_000),
+                created_nanos: Some(1_000_000_000),
+                expected_session_id: "D09:unknown",
+                expects_session_start: false,
+            },
+        ] {
+            let registry = Registry::new();
+            let mut metrics = InventoryMetrics::new(&registry, "carbide_hardware_health").unwrap();
+            let rack = RackInventory {
+                rack_id: RackId::new("D09"),
+                created_seconds: case.created_seconds,
+                created_nanos: case.created_nanos,
+            };
+            metrics.reconcile_at(
+                &[rack],
+                &[switch_endpoint(
+                    SwitchEndpointRole::Bmc,
+                    "02:00:00:00:00:01",
+                )],
+                1_800_000_000.0,
+            );
+
+            let output = exposition(&registry);
+            let component_line = output
+                .lines()
+                .find(|line| line.starts_with("carbide_hardware_health_component_inventory_info{"))
+                .unwrap_or_else(|| panic!("{}: component inventory missing", case.scenario));
+            assert!(
+                component_line.contains(&format!("session_id=\"{}\"", case.expected_session_id)),
+                "{}: unexpected component session: {component_line}",
+                case.scenario
+            );
+
+            let has_session_start = output.lines().any(|line| {
+                line.starts_with("carbide_hardware_health_rack_session_start_time_seconds{")
+            });
+            assert_eq!(
+                has_session_start, case.expects_session_start,
+                "{}: unexpected rack session start metric",
+                case.scenario
+            );
+        }
     }
 
     #[test]
