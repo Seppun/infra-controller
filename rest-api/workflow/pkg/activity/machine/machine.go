@@ -794,6 +794,54 @@ func normalizeMachineInterfaceIPAddresses(addresses []string) []string {
 	return addresses
 }
 
+// networkCapabilityDeviceType maps a wire device type onto the stored value for
+// a Network capability. UNKNOWN is the enum's defined "unspecified" sentinel, so
+// it stores empty silently just as an omitted field does; the explicit `default`
+// branch is preserved so genuine schema drift is still surfaced.
+// TODO: support other Network device-type variants as the wire enum grows;
+// currently only DPU and SpectrumX are recognized.
+func networkCapabilityDeviceType(logger zerolog.Logger, deviceType *corev1.MachineCapabilityDeviceType) *cdbm.MachineCapabilityDeviceType {
+	result := cdbm.MachineCapabilityDeviceType("")
+	if deviceType == nil {
+		return &result
+	}
+
+	switch *deviceType {
+	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+		// Defined sentinel for "unspecified": store empty without warning.
+	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
+		result = cdbm.MachineCapabilityDeviceTypeDPU
+	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X:
+		result = cdbm.MachineCapabilityDeviceTypeSpectrumX
+	default:
+		logger.Warn().Str("DeviceType", deviceType.String()).Msg("unsupported MachineCapabilityDeviceType for Network capability; defaulting to empty")
+	}
+
+	return &result
+}
+
+// gpuCapabilityDeviceType maps a wire device type onto the stored value for a
+// GPU capability, on the same terms as networkCapabilityDeviceType.
+// TODO: support other GPU device-type variants as the wire enum grows;
+// currently only NVLink is recognized.
+func gpuCapabilityDeviceType(logger zerolog.Logger, deviceType *corev1.MachineCapabilityDeviceType) *cdbm.MachineCapabilityDeviceType {
+	result := cdbm.MachineCapabilityDeviceType("")
+	if deviceType == nil {
+		return &result
+	}
+
+	switch *deviceType {
+	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+		// Defined sentinel for "unspecified": store empty without warning.
+	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK:
+		result = cdbm.MachineCapabilityDeviceTypeNVLink
+	default:
+		logger.Warn().Str("DeviceType", deviceType.String()).Msg("unsupported MachineCapabilityDeviceType for GPU capability; defaulting to empty")
+	}
+
+	return &result
+}
+
 // Utility function to parse discovery data and create/update Machine Capability records
 func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, controllerMachine *corev1.Machine, machine *cdbm.Machine) error {
 	slogger := logger.With().Str("Machine ID", machine.ID).Logger()
@@ -844,24 +892,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, gpuCap := range controllerCapsGpu {
-		// Set the device type to NVLink if it's an NVLink GPU capability.
-		// Unknown wire values are coerced to the empty string with a
-		// warning logged — preserve the explicit `default` branch so
-		// schema drift is surfaced rather than silently swallowed.
-		// TODO: support other GPU device-type variants as the wire enum
-		// grows; currently only NVLink is recognized.
-		var deviceType *cdbm.MachineCapabilityDeviceType
-		dtEmpty := cdbm.MachineCapabilityDeviceType("")
-		deviceType = &dtEmpty
-		if gpuCap.DeviceType != nil {
-			switch *gpuCap.DeviceType {
-			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK:
-				dt := cdbm.MachineCapabilityDeviceTypeNVLink
-				deviceType = &dt
-			default:
-				logger.Warn().Str("DeviceType", gpuCap.DeviceType.String()).Msg("unsupported MachineCapabilityDeviceType for GPU capability; defaulting to empty")
-			}
-		}
+		deviceType := gpuCapabilityDeviceType(logger, gpuCap.DeviceType)
 		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeGPU, gpuCap.Name, deviceType)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
@@ -927,26 +958,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, netCap := range controllerCapsNetwork {
-		// Preserve supported network device types so capability identity remains
-		// stable when otherwise identical generic, DPU, and SpectrumX entries coexist.
-		// Unknown wire values are coerced to the empty string with a
-		// warning logged — preserve the explicit `default` branch so
-		// schema drift is surfaced rather than silently swallowed.
-		var deviceType *cdbm.MachineCapabilityDeviceType
-		dtEmpty := cdbm.MachineCapabilityDeviceType("")
-		deviceType = &dtEmpty
-		if netCap.DeviceType != nil {
-			switch *netCap.DeviceType {
-			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
-				dt := cdbm.MachineCapabilityDeviceTypeDPU
-				deviceType = &dt
-			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X:
-				dt := cdbm.MachineCapabilityDeviceTypeSpectrumX
-				deviceType = &dt
-			default:
-				logger.Warn().Str("DeviceType", netCap.DeviceType.String()).Msg("unsupported MachineCapabilityDeviceType for Network capability; defaulting to empty")
-			}
-		}
+		deviceType := networkCapabilityDeviceType(logger, netCap.DeviceType)
 		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeNetwork, netCap.Name, deviceType)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
