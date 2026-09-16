@@ -837,6 +837,7 @@ dependencies = [
  "bytes",
  "carbide-axum-utils",
  "carbide-test-support",
+ "carbide-tls",
  "chrono",
  "clap",
  "eyre",
@@ -845,6 +846,7 @@ dependencies = [
  "futures",
  "http-body-util",
  "hyper",
+ "hyper-util",
  "indexmap 2.14.0",
  "itertools 0.14.0",
  "lazy_static",
@@ -862,6 +864,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http 0.7.0",
  "tracing",
@@ -1530,6 +1534,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "axum",
+ "carbide-test-support",
  "duration-str",
  "glob",
  "rand 0.10.1",
@@ -1747,17 +1752,23 @@ dependencies = [
  "clap",
  "dns-record",
  "eyre",
+ "futures",
  "hickory-resolver",
  "hickory-server",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "logfmt",
  "lru",
  "metrics-endpoint",
  "opentelemetry 0.32.0",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "prost",
  "serde",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tracing",
@@ -2314,6 +2325,7 @@ dependencies = [
  "async-trait",
  "carbide-instrument",
  "carbide-secrets",
+ "carbide-test-support",
  "carbide-utils",
  "carbide-uuid",
  "eyre",
@@ -2439,6 +2451,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ipmi",
  "carbide-network",
+ "carbide-rms-mock",
  "carbide-rpc",
  "carbide-test-support",
  "carbide-tls",
@@ -2698,6 +2711,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -2896,7 +2910,6 @@ dependencies = [
  "config-version",
  "duration-str",
  "eyre",
- "librms",
  "mac_address",
  "opentelemetry 0.32.0",
  "reqwest 0.13.4",
@@ -2939,6 +2952,19 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "carbide-rms-mock"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "librms",
+ "mac_address",
+ "serde",
+ "tokio",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]
@@ -3278,6 +3304,7 @@ dependencies = [
  "serde",
  "size",
  "strip-ansi-escapes",
+ "surge-ping",
  "temp-dir",
  "thiserror 2.0.18",
  "tokio",
@@ -6735,6 +6762,7 @@ name = "libnmxc"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "carbide-test-support",
  "clap",
  "http",
  "prost",
@@ -6773,7 +6801,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.5#569bc602d2aa03b3f2ea4c9e006d593a05c7b1dc"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.6#f2ebed4d9ba048da3a8a959d8be5104e205abc03"
 dependencies = [
  "chrono",
  "clap",
@@ -7420,16 +7448,21 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "color-eyre",
+ "config-version",
  "csv",
  "eyre",
  "futures",
  "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ipnet",
  "libredfish",
  "librms",
  "mac_address",
  "pandoc",
  "prettytable-rs",
+ "prost",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
