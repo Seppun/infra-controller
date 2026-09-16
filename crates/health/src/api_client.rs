@@ -43,8 +43,9 @@ use crate::bmc::{
     bmc_latency_endpoint_labels,
 };
 use crate::endpoint::{
-    BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSource, MachineData,
-    PowerShelfData, RackInventory, SharedSystemUuid, SwitchData, SwitchEndpointRole,
+    BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSnapshot, EndpointSource,
+    InventorySnapshot, MachineData, PowerShelfData, RackInventory, SharedSystemUuid, SwitchData,
+    SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
 
@@ -335,6 +336,19 @@ struct CachedBmcClient {
     system_uuid: SharedSystemUuid,
 }
 
+struct ComponentEndpointFetch {
+    endpoints: Vec<Arc<BmcEndpoint>>,
+    inventory_error: Option<HealthError>,
+}
+
+fn effective_find_by_ids_page_size(preferred: usize, advertised_max: usize) -> usize {
+    if advertised_max == 0 {
+        preferred
+    } else {
+        preferred.min(advertised_max)
+    }
+}
+
 impl ApiEndpointSource {
     pub fn new(
         api: Arc<ApiClientWrapper>,
@@ -373,15 +387,38 @@ impl ApiEndpointSource {
     }
 
     pub async fn fetch_bmc_hosts(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
+        Ok(self.fetch_component_endpoints().await?.endpoints)
+    }
+
+    async fn fetch_component_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
         let mut endpoints = self.fetch_machine_endpoints().await?;
-        endpoints.extend(self.fetch_switch_endpoints().await);
-        endpoints.extend(self.fetch_power_shelf_endpoints().await);
+        let mut inventory_error = None;
+
+        match self.fetch_power_shelf_endpoints().await {
+            Ok(power_shelves) => endpoints.extend(power_shelves),
+            Err(error) => {
+                tracing::warn!(?error, "Failed to fetch power shelf endpoints");
+                inventory_error = Some(error);
+            }
+        }
+        match self.fetch_switch_endpoints().await {
+            Ok(switches) => endpoints.extend(switches),
+            Err(error) => {
+                tracing::warn!(?error, "Failed to fetch switch endpoints");
+                if inventory_error.is_none() {
+                    inventory_error = Some(error);
+                }
+            }
+        }
 
         self.prune_bmc_client_cache(&endpoints);
 
         tracing::info!(endpoint_count = endpoints.len(), "Prepared endpoints");
 
-        Ok(endpoints)
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            inventory_error,
+        })
     }
 
     async fn fetch_rack_inventory(&self) -> Result<Vec<RackInventory>, HealthError> {
@@ -393,8 +430,22 @@ impl ApiEndpointSource {
             .map_err(HealthError::ApiInvocationError)?
             .rack_ids;
 
+        // A zero limit means the server does not cap find-by-ID requests. Keep
+        // pages bounded in that case, and otherwise honor the advertised cap.
+        const PREFERRED_PAGE_SIZE: usize = 100;
+        let max_find_by_ids = self
+            .api
+            .client
+            .version(true)
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .runtime_config
+            .unwrap_or_default()
+            .max_find_by_ids as usize;
+        let page_size = effective_find_by_ids_page_size(PREFERRED_PAGE_SIZE, max_find_by_ids);
+
         let mut inventory = Vec::with_capacity(rack_ids.len());
-        for rack_ids in rack_ids.chunks(100) {
+        for rack_ids in rack_ids.chunks(page_size) {
             let racks = self
                 .api
                 .client
@@ -418,6 +469,28 @@ impl ApiEndpointSource {
         }
 
         Ok(inventory)
+    }
+
+    async fn fetch_endpoint_snapshot(&self) -> Result<EndpointSnapshot, HealthError> {
+        let ComponentEndpointFetch {
+            endpoints,
+            inventory_error,
+        } = self.fetch_component_endpoints().await?;
+
+        let inventory = match inventory_error {
+            Some(error) => Err(error),
+            None => self.fetch_rack_inventory().await.map(|racks| {
+                Some(InventorySnapshot {
+                    racks,
+                    endpoints: endpoints.clone(),
+                })
+            }),
+        };
+
+        Ok(EndpointSnapshot {
+            endpoints,
+            inventory,
+        })
     }
 
     fn prune_bmc_client_cache(&self, live_endpoints: &[Arc<BmcEndpoint>]) {
@@ -490,85 +563,81 @@ impl ApiEndpointSource {
         Ok(endpoints)
     }
 
-    async fn fetch_switch_endpoints(&self) -> Vec<Arc<BmcEndpoint>> {
+    async fn fetch_switch_endpoints(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
         let switch_request = rpc::forge::SwitchQuery {
             name: None,
             switch_id: None,
         };
 
-        match self.api.client.find_switches(switch_request).await {
-            Ok(response) => {
-                let mut endpoints = Vec::new();
+        let response = self
+            .api
+            .client
+            .find_switches(switch_request)
+            .await
+            .map_err(HealthError::ApiInvocationError)?;
+        let mut endpoints = Vec::new();
 
-                for switch in response.switches {
-                    match self.extract_switch_endpoint(&switch) {
-                        Ok(endpoint) => endpoints.push(endpoint),
-                        Err(error) => tracing::warn!(
-                            ?switch,
-                            ?error,
-                            rack_id = switch.rack_id.as_ref().map(tracing::field::display),
-                            "Could not add switch endpoint due to error"
-                        ),
-                    }
-
-                    match self.extract_switch_host_endpoint(&switch) {
-                        Ok(Some(endpoint)) => endpoints.push(endpoint),
-                        Ok(None) => {}
-                        Err(error) => tracing::warn!(
-                            ?switch,
-                            ?error,
-                            rack_id = switch.rack_id.as_ref().map(tracing::field::display),
-                            "Could not add switch host endpoint due to error"
-                        ),
-                    }
-                }
-
-                tracing::debug!(
-                    switch_endpoint_count = endpoints.len(),
-                    "Fetched switch endpoints"
-                );
-                endpoints
+        for switch in response.switches {
+            match self.extract_switch_endpoint(&switch) {
+                Ok(endpoint) => endpoints.push(endpoint),
+                Err(error) => tracing::warn!(
+                    ?switch,
+                    ?error,
+                    rack_id = switch.rack_id.as_ref().map(tracing::field::display),
+                    "Could not add switch endpoint due to error"
+                ),
             }
-            Err(error) => {
-                tracing::warn!(?error, "Failed to fetch switch endpoints");
-                Vec::new()
+
+            match self.extract_switch_host_endpoint(&switch) {
+                Ok(Some(endpoint)) => endpoints.push(endpoint),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    ?switch,
+                    ?error,
+                    rack_id = switch.rack_id.as_ref().map(tracing::field::display),
+                    "Could not add switch host endpoint due to error"
+                ),
             }
         }
+
+        tracing::debug!(
+            switch_endpoint_count = endpoints.len(),
+            "Fetched switch endpoints"
+        );
+        Ok(endpoints)
     }
 
-    async fn fetch_power_shelf_endpoints(&self) -> Vec<Arc<BmcEndpoint>> {
+    async fn fetch_power_shelf_endpoints(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
         let request = rpc::forge::PowerShelfQuery {
             name: None,
             power_shelf_id: None,
         };
 
-        match self.api.client.find_power_shelves(request).await {
-            Ok(response) => {
-                let mut endpoints = Vec::new();
+        let response = self
+            .api
+            .client
+            .find_power_shelves(request)
+            .await
+            .map_err(HealthError::ApiInvocationError)?;
+        let mut endpoints = Vec::new();
 
-                for power_shelf in response.power_shelves {
-                    match self.extract_power_shelf_endpoint(&power_shelf) {
-                        Ok(endpoint) => endpoints.push(endpoint),
-                        Err(error) => tracing::warn!(
-                            ?power_shelf,
-                            ?error,
-                            rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
-                            "Could not add power shelf endpoint due to error"
-                        ),
-                    }
-                }
-
-                tracing::debug!(
-                    power_shelf_endpoint_count = endpoints.len(),
-                    "Fetched power shelf endpoints"
-                );
-                endpoints
-            }
-            Err(error) => {
-                tracing::warn!(?error, "Failed to fetch power shelf endpoints");
-                Vec::new()
+        for power_shelf in response.power_shelves {
+            match self.extract_power_shelf_endpoint(&power_shelf) {
+                Ok(endpoint) => endpoints.push(endpoint),
+                Err(error) => tracing::warn!(
+                    ?power_shelf,
+                    ?error,
+                    rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
+                    "Could not add power shelf endpoint due to error"
+                ),
             }
         }
+
+        tracing::debug!(
+            power_shelf_endpoint_count = endpoints.len(),
+            "Fetched power shelf endpoints"
+        );
+        Ok(endpoints)
     }
 
     fn extract_machine_endpoint(
@@ -785,10 +854,8 @@ impl EndpointSource for ApiEndpointSource {
         Box::pin(self.fetch_bmc_hosts())
     }
 
-    fn fetch_rack_inventory<'a>(
-        &'a self,
-    ) -> BoxFuture<'a, Result<Option<Vec<RackInventory>>, HealthError>> {
-        Box::pin(async move { self.fetch_rack_inventory().await.map(Some) })
+    fn fetch_snapshot<'a>(&'a self) -> BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+        Box::pin(self.fetch_endpoint_snapshot())
     }
 }
 
@@ -960,6 +1027,32 @@ mod tests {
             "mixed gpu driver versions" {
                 Some(discovery_with_driver_versions(&["570.82", "580.12"])) => None,
             }
+        );
+    }
+
+    #[test]
+    fn inventory_page_size_honors_server_limit() {
+        check_values(
+            [
+                Check {
+                    scenario: "server advertises no limit",
+                    input: (100, 0),
+                    expect: 100,
+                },
+                Check {
+                    scenario: "server limit is below preferred size",
+                    input: (100, 75),
+                    expect: 75,
+                },
+                Check {
+                    scenario: "server limit exceeds preferred size",
+                    input: (100, 200),
+                    expect: 100,
+                },
+            ],
+            |(preferred, advertised_max)| {
+                effective_find_by_ids_page_size(preferred, advertised_max)
+            },
         );
     }
 

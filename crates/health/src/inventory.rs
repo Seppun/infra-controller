@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use prometheus::{Gauge, GaugeVec, IntCounter, Opts, Registry};
+use prometheus::{Gauge, GaugeVec, Opts, Registry};
 
 use crate::HealthError;
 use crate::endpoint::{BmcEndpoint, EndpointMetadata, RackInventory};
@@ -39,6 +39,21 @@ const COMPONENT_LABELS: [&str; 11] = [
 ];
 const RACK_LABELS: [&str; 2] = ["rack_id", "session_id"];
 const RACK_DOMAIN_LABELS: [&str; 3] = ["rack_id", "session_id", "nvl_domain"];
+
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "hardware_inventory_refresh_failed",
+    metric_name = "carbide_hardware_health_inventory_refresh_failures_total",
+    component = "nico-hardware-health",
+    log = warn,
+    metric = counter,
+    message = "authoritative hardware inventory refresh failed; retaining previous snapshot",
+    describe = "Number of authoritative hardware inventory refreshes that failed."
+)]
+pub(crate) struct InventoryRefreshFailed {
+    #[context]
+    pub(crate) error: String,
+}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RackSeries {
@@ -257,7 +272,6 @@ pub(crate) struct InventoryMetrics {
     rack_nvlink_domain_info: GaugeVec,
     rack_session_start_time_seconds: GaugeVec,
     last_success_time_seconds: Gauge,
-    refresh_failures_total: IntCounter,
     current_components: BTreeSet<ComponentSeries>,
     current_rack_domains: BTreeSet<RackDomainSeries>,
     current_racks: BTreeSet<RackSeries>,
@@ -298,18 +312,11 @@ impl InventoryMetrics {
         )?;
         registry.register(Box::new(last_success_time_seconds.clone()))?;
 
-        let refresh_failures_total = IntCounter::new(
-            format!("{metrics_prefix}_inventory_refresh_failures_total"),
-            "Number of failed NICo rack-inventory refreshes",
-        )?;
-        registry.register(Box::new(refresh_failures_total.clone()))?;
-
         Ok(Self {
             component_info,
             rack_nvlink_domain_info,
             rack_session_start_time_seconds,
             last_success_time_seconds,
-            refresh_failures_total,
             current_components: BTreeSet::new(),
             current_rack_domains: BTreeSet::new(),
             current_racks: BTreeSet::new(),
@@ -438,10 +445,6 @@ impl InventoryMetrics {
         self.current_racks = desired_racks;
         self.last_success_time_seconds.set(observed_at_seconds);
     }
-
-    pub(crate) fn record_refresh_failure(&self) {
-        self.refresh_failures_total.inc();
-    }
 }
 
 fn unix_now_seconds() -> f64 {
@@ -456,6 +459,7 @@ mod tests {
     use std::net::IpAddr;
     use std::str::FromStr;
 
+    use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_uuid::nvlink::NvLinkDomainId;
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
@@ -540,6 +544,27 @@ mod tests {
         metrics.reconcile_at(&[rack()], &endpoints, 1_800_000_000.0);
 
         let output = exposition(&registry);
+        for (name, help) in [
+            (
+                "carbide_hardware_health_component_inventory_info",
+                "Authoritative NICo component inventory for the current rack-ingestion session",
+            ),
+            (
+                "carbide_hardware_health_inventory_last_success_time_seconds",
+                "Unix timestamp of the last successful NICo inventory reconciliation",
+            ),
+            (
+                "carbide_hardware_health_rack_nvlink_domain_info",
+                "Authoritative NICo rack-to-NVLink-domain assignments for current rack-ingestion sessions",
+            ),
+            (
+                "carbide_hardware_health_rack_session_start_time_seconds",
+                "NICo rack creation time in Unix seconds, labeled by its ingestion session",
+            ),
+        ] {
+            assert!(output.contains(&format!("# HELP {name} {help}")));
+            assert!(output.contains(&format!("# TYPE {name} gauge")));
+        }
         assert_eq!(
             output
                 .lines()
@@ -695,20 +720,42 @@ mod tests {
     }
 
     #[test]
-    fn failed_refresh_retains_last_successful_snapshot() {
+    fn unreconciled_refresh_retains_last_successful_snapshot() {
         let registry = Registry::new();
         let mut metrics = InventoryMetrics::new(&registry, "carbide_hardware_health").unwrap();
         let endpoint = switch_endpoint(SwitchEndpointRole::Bmc, "02:00:00:00:00:01");
 
         metrics.reconcile_at(&[rack()], &[endpoint], 1_800_000_000.0);
-        metrics.record_refresh_failure();
 
         let output = exposition(&registry);
         assert!(output.contains("carbide_hardware_health_component_inventory_info{"));
-        assert!(output.contains("carbide_hardware_health_inventory_refresh_failures_total 1"));
         assert!(
             output
                 .contains("carbide_hardware_health_inventory_last_success_time_seconds 1800000000")
+        );
+    }
+
+    #[test]
+    fn refresh_failure_emits_correlated_metric_and_warning() {
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| {
+            carbide_instrument::emit(InventoryRefreshFailed {
+                error: "simulated inventory failure".to_string(),
+            });
+        });
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].level, tracing::Level::WARN);
+        assert_eq!(
+            logs[0].message,
+            "authoritative hardware inventory refresh failed; retaining previous snapshot"
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_hardware_health_inventory_refresh_failures_total",
+                &[],
+            ),
+            1.0
         );
     }
 }

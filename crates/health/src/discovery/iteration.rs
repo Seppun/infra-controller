@@ -33,7 +33,8 @@ use super::reachability::reconcile_reachability_collectors;
 use super::spawn::{spawn_collectors_for_endpoint, switch_supports_nmxc_subscription};
 use crate::HealthError;
 use crate::config::Configurable;
-use crate::endpoint::{BmcEndpoint, EndpointSource};
+use crate::endpoint::{BmcEndpoint, EndpointSnapshot, EndpointSource};
+use crate::inventory::InventoryRefreshFailed;
 use crate::sharding::ShardManager;
 use crate::sink::DataSink;
 
@@ -73,8 +74,11 @@ pub async fn run_discovery_iteration(
     let iteration_start = Instant::now();
 
     let fetch_start = Instant::now();
-    let endpoints = match endpoint_source.fetch_bmc_hosts().await {
-        Ok(v) => v,
+    let EndpointSnapshot {
+        endpoints,
+        inventory,
+    } = match endpoint_source.fetch_snapshot().await {
+        Ok(snapshot) => snapshot,
         Err(e) => {
             tracing::error!(error = ?e, "Could not fetch endpoints");
             return Err(e);
@@ -91,22 +95,26 @@ pub async fn run_discovery_iteration(
         .cloned()
         .collect();
 
-    match endpoint_source.fetch_rack_inventory().await {
-        Ok(Some(racks)) => {
-            let sharded_racks = racks
+    match inventory {
+        Ok(Some(inventory)) => {
+            let sharded_racks = inventory
+                .racks
                 .into_iter()
                 .filter(|rack| shard_manager.should_monitor_key(rack.rack_id.as_ref()))
                 .collect::<Vec<_>>();
+            let sharded_inventory_endpoints = inventory
+                .endpoints
+                .into_iter()
+                .filter(|endpoint| shard_manager.should_monitor(endpoint))
+                .collect::<Vec<_>>();
             ctx.inventory_metrics
-                .reconcile(&sharded_racks, &sharded_endpoints);
+                .reconcile(&sharded_racks, &sharded_inventory_endpoints);
         }
         Ok(None) => {}
         Err(error) => {
-            ctx.inventory_metrics.record_refresh_failure();
-            tracing::warn!(
-                ?error,
-                "Could not refresh NICo rack inventory; retaining previous Prometheus snapshot"
-            );
+            carbide_instrument::emit(InventoryRefreshFailed {
+                error: error.to_string(),
+            });
         }
     }
 

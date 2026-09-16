@@ -93,6 +93,19 @@ pub struct RackInventory {
     pub created_nanos: Option<i32>,
 }
 
+/// One complete authoritative component-inventory observation.
+pub struct InventorySnapshot {
+    pub racks: Vec<RackInventory>,
+    pub endpoints: Vec<Arc<BmcEndpoint>>,
+}
+
+/// Endpoints discovered for collection and the optional authoritative inventory
+/// observation made during the same source fetch.
+pub struct EndpointSnapshot {
+    pub endpoints: Vec<Arc<BmcEndpoint>>,
+    pub inventory: Result<Option<InventorySnapshot>, HealthError>,
+}
+
 impl BmcEndpoint {
     pub fn key(&self) -> String {
         self.addr.mac.to_string()
@@ -331,14 +344,18 @@ impl From<BmcCredentials> for nv_redfish::bmc_http::BmcCredentials {
 pub trait EndpointSource: Send + Sync {
     fn fetch_bmc_hosts<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>>;
 
-    /// Returns rack lifecycle metadata when this source is backed by NICo.
+    /// Fetches collector endpoints together with any authoritative inventory
+    /// observation supplied by this source.
     ///
-    /// `None` means the source cannot provide authoritative rack sessions; an
-    /// empty vector means a successful NICo query found no racks.
-    fn fetch_rack_inventory<'a>(
-        &'a self,
-    ) -> BoxFuture<'a, Result<Option<Vec<RackInventory>>, HealthError>> {
-        Box::pin(async { Ok(None) })
+    /// The default supports auxiliary endpoint sources, which do not define an
+    /// authoritative inventory population.
+    fn fetch_snapshot<'a>(&'a self) -> BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+        Box::pin(async move {
+            Ok(EndpointSnapshot {
+                endpoints: self.fetch_bmc_hosts().await?,
+                inventory: Ok(None),
+            })
+        })
     }
 }
 
