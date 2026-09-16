@@ -66,6 +66,16 @@ mat-k8s-controller:
 
 # Init at thousands of hosts binds the redfish port only after registering
 # every expected machine; give probes a long bring-up window (see #4298).
+# Sizing rule in the chart values.yaml is per pod: largest pod 2,700 records
+# x 2s = 1.5h; 10h here keeps headroom.
+startupProbe:
+  tcpSocket:
+    port: redfish
+  periodSeconds: 30
+  failureThreshold: 1200
+  successThreshold: 1
+  timeoutSeconds: 10
+
 livenessProbe:
   tcpSocket:
     port: redfish
