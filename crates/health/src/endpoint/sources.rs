@@ -780,6 +780,7 @@ mod tests {
             metadata: EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(test_power_shelf_id("power-shelf-a")),
                 serial: None,
+                nvlink_domain_uuid: None,
             }),
             bmc_mac: Some(MacAddress::from_str("00:11:22:33:44:55").unwrap()),
         };

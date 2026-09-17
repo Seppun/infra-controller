@@ -432,6 +432,9 @@ fn power_shelf_component_inventory(
         metadata: EndpointMetadata::PowerShelf(PowerShelfData {
             id: Some(power_shelf_id),
             serial: None,
+            nvlink_domain_uuid: power_shelf
+                .nvlink_domain_uuid
+                .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
         }),
         bmc_mac: inventory_bmc_mac(power_shelf.bmc_info.as_ref()),
     }))
