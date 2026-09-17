@@ -845,6 +845,93 @@ func TestMirrorComponents_MatchByMACSurvivesRelabel(t *testing.T) {
 	}
 }
 
+// Label transfers and swaps must converge in one pass regardless of spec order.
+// The host BMC MAC, not the chassis pair, identifies each component.
+func TestMirrorComponents_ChassisLabelOwnershipTransitions(t *testing.T) {
+	type labels struct {
+		name         string
+		manufacturer string
+		serial       string
+		mac          string
+	}
+
+	for _, tc := range []struct {
+		name    string
+		initial []labels
+		desired []labels
+	}{
+		{
+			name: "transfer is ordered recipient before current owner",
+			initial: []labels{
+				{name: "owner", manufacturer: "Mfg", serial: "PAIR-A", mac: "aa:bb:cc:dd:ee:71"},
+				{name: "recipient", manufacturer: "Mfg", serial: "PAIR-B", mac: "aa:bb:cc:dd:ee:72"},
+			},
+			desired: []labels{
+				{name: "recipient", manufacturer: "Mfg", serial: "PAIR-A", mac: "aa:bb:cc:dd:ee:72"},
+				{name: "owner", manufacturer: "Mfg", serial: "PAIR-C", mac: "aa:bb:cc:dd:ee:71"},
+			},
+		},
+		{
+			name: "two components swap pairs",
+			initial: []labels{
+				{name: "left", manufacturer: "Mfg", serial: "PAIR-LEFT", mac: "aa:bb:cc:dd:ee:73"},
+				{name: "right", manufacturer: "Mfg", serial: "PAIR-RIGHT", mac: "aa:bb:cc:dd:ee:74"},
+			},
+			desired: []labels{
+				{name: "left", manufacturer: "Mfg", serial: "PAIR-RIGHT", mac: "aa:bb:cc:dd:ee:73"},
+				{name: "right", manufacturer: "Mfg", serial: "PAIR-LEFT", mac: "aa:bb:cc:dd:ee:74"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			idsByName := make(map[string]uuid.UUID, len(tc.initial))
+			for _, initial := range tc.initial {
+				component := model.Component{
+					Name:         initial.name,
+					Type:         compType(),
+					Manufacturer: initial.manufacturer,
+					SerialNumber: initial.serial,
+				}
+				require.NoError(t, component.Create(ctx, pool.DB))
+				idsByName[initial.name] = component.ID
+				bmc := model.BMC{
+					MacAddress:  initial.mac,
+					Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+					ComponentID: component.ID,
+				}
+				_, err := pool.DB.NewInsert().Model(&bmc).Exec(ctx)
+				require.NoError(t, err)
+			}
+
+			specs := make([]expectedComponentSpec, 0, len(tc.desired))
+			for _, desired := range tc.desired {
+				specs = append(specs, expectedComponentSpec{
+					Type:         compType(),
+					Name:         desired.name,
+					Manufacturer: desired.manufacturer,
+					SerialNumber: desired.serial,
+					BMC:          expectedBMCSpec{MACAddress: desired.mac},
+				})
+			}
+
+			mirrorExpectedComponents(ctx, pool, compType(), specs, map[string]uuid.UUID{})
+
+			total, err := pool.DB.NewSelect().Model((*model.Component)(nil)).Count(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, len(tc.initial), total)
+			for _, desired := range tc.desired {
+				id := idsByName[desired.name]
+				got, err := (&model.Component{ID: id}).GetIncludingDeleted(ctx, pool.DB)
+				require.NoError(t, err)
+				assert.Nil(t, got.DeletedAt)
+				assert.Equal(t, desired.manufacturer, got.Manufacturer)
+				assert.Equal(t, desired.serial, got.SerialNumber)
+			}
+		})
+	}
+}
+
 // Swapping a BMC board changes the MAC Core reports. The natural key adopts the
 // existing row and the BMC is repointed, so the component keeps its UUID.
 func TestMirrorComponents_BMCBoardSwapAdoptsByNaturalKey(t *testing.T) {

@@ -203,38 +203,28 @@ func TestStillReportedByCore(t *testing.T) {
 	}
 }
 
-func TestClearComponentLabelsIfSlotTaken(t *testing.T) {
+func TestComponentChassisSlotOwnedByOther(t *testing.T) {
 	owner := &model.Component{ID: uuid.New(), Manufacturer: "Foxconn", SerialNumber: "SN-1"}
 	flowByNaturalKey := map[string]*model.Component{
 		naturalKey("Foxconn", "SN-1"): owner,
 	}
 
-	t.Run("labels held by another component are dropped", func(t *testing.T) {
-		desired := model.Component{Manufacturer: "Foxconn", SerialNumber: "SN-1"}
-		clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, uuid.New(), "Compute")
-		assert.Empty(t, desired.Manufacturer)
-		assert.Empty(t, desired.SerialNumber)
-	})
+	tests := []struct {
+		name    string
+		desired model.Component
+		want    bool
+	}{
+		{name: "pair held by another component", desired: model.Component{ID: uuid.New(), Manufacturer: "Foxconn", SerialNumber: "SN-1"}, want: true},
+		{name: "pair held by the desired component", desired: model.Component{ID: owner.ID, Manufacturer: "Foxconn", SerialNumber: "SN-1"}},
+		{name: "unclaimed pair", desired: model.Component{ID: uuid.New(), Manufacturer: "Wistron", SerialNumber: "SN-9"}},
+		{name: "half-populated pair", desired: model.Component{ID: uuid.New(), SerialNumber: "SN-1"}},
+	}
 
-	t.Run("the component already holding the pair keeps it", func(t *testing.T) {
-		desired := model.Component{Manufacturer: "Foxconn", SerialNumber: "SN-1"}
-		clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, owner.ID, "Compute")
-		assert.Equal(t, "Foxconn", desired.Manufacturer)
-		assert.Equal(t, "SN-1", desired.SerialNumber)
-	})
-
-	t.Run("an unclaimed pair is kept", func(t *testing.T) {
-		desired := model.Component{Manufacturer: "Wistron", SerialNumber: "SN-9"}
-		clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, uuid.Nil, "Compute")
-		assert.Equal(t, "Wistron", desired.Manufacturer)
-		assert.Equal(t, "SN-9", desired.SerialNumber)
-	})
-
-	t.Run("a half-populated pair occupies no slot and is left alone", func(t *testing.T) {
-		desired := model.Component{SerialNumber: "SN-1"}
-		clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, uuid.Nil, "Compute")
-		assert.Equal(t, "SN-1", desired.SerialNumber)
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, componentChassisSlotOwnedByOther(flowByNaturalKey, &tc.desired))
+		})
+	}
 }
 
 func TestResolveRackID(t *testing.T) {

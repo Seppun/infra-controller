@@ -288,11 +288,12 @@ func mirrorExpectedComponents(
 	}
 
 	type plan struct {
-		toInsert     []model.Component
-		toInsertBMCs []model.BMC // parallel to toInsert; component_id filled after insert
-		toUpdate     []model.Component
-		toUpdateBMCs []bmcOps // one per toUpdate entry (any/all of insert/update/deletes may be set)
-		toDelete     []model.Component
+		toInsert             []model.Component
+		toInsertBMCs         []model.BMC // parallel to toInsert; component_id filled after insert
+		toUpdate             []model.Component
+		toUpdateBMCs         []bmcOps // one per toUpdate entry (any/all of insert/update/deletes may be set)
+		toUpdateReleasesSlot []bool   // parallel to toUpdate
+		toDelete             []model.Component
 	}
 	var p plan
 
@@ -404,7 +405,6 @@ func mirrorExpectedComponents(
 					Msg("Expected-inventory mirror: resurrecting soft-deleted component")
 			}
 
-			clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, candidate.ID, componentType)
 			diffs := diffComponentFields(&candidate, &desired, s)
 			if len(diffs) > 0 {
 				applyComponentChanges(&candidate, &desired, s)
@@ -416,11 +416,12 @@ func mirrorExpectedComponents(
 			if needUpdate || bmcOps.insert != nil || bmcOps.update != nil || len(bmcOps.deletes) > 0 {
 				p.toUpdate = append(p.toUpdate, candidate)
 				p.toUpdateBMCs = append(p.toUpdateBMCs, bmcOps)
+				p.toUpdateReleasesSlot = append(p.toUpdateReleasesSlot,
+					componentChassisSlotOwnedByOther(flowByNaturalKey, &candidate))
 			}
 			continue
 		}
 
-		clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, uuid.Nil, componentType)
 		p.toInsert = append(p.toInsert, desired)
 		p.toInsertBMCs = append(p.toInsertBMCs, model.BMC{
 			MacAddress: s.BMC.MACAddress,
@@ -484,6 +485,11 @@ func mirrorExpectedComponents(
 			}
 		}
 		for i := range p.toUpdate {
+			if p.toUpdateReleasesSlot[i] {
+				if err := releaseComponentChassisSlot(ctx, tx, &p.toUpdate[i], now); err != nil {
+					return err
+				}
+			}
 			// Mirror-managed columns only. external_id / power_state /
 			// firmware_version / status are owned by the actual-sync loop
 			// and leak_status by the leak-detection loop; a full-model
@@ -633,34 +639,70 @@ func stillReportedByCore(macs []string, naturalKey string, seenMACs, seenNatural
 	return ok
 }
 
-// clearComponentLabelsIfSlotTaken blanks desired's manufacturer and serial
-// number when a Flow component other than selfID already holds that complete
-// pair. selfID is uuid.Nil for an INSERT. component_manufacturer_serial_idx
-// covers soft-deleted rows too, so writing an occupied pair would abort the
-// whole type's transaction; the component is still mirrored under its host BMC
-// MAC, just without the labels.
-func clearComponentLabelsIfSlotTaken(
-	desired *model.Component,
+// componentChassisSlotOwnedByOther reports whether the initial Flow snapshot
+// contains another row holding the desired chassis pair. The transaction must
+// release that row before applying Core's authoritative labels. Using the
+// initial snapshot keeps this true for both sides of a swap regardless of spec
+// order.
+func componentChassisSlotOwnedByOther(
 	flowByNaturalKey map[string]*model.Component,
-	selfID uuid.UUID,
-	componentType string,
-) {
+	desired *model.Component,
+) bool {
 	key := naturalKeyOrEmpty(desired.Manufacturer, desired.SerialNumber)
 	if key == "" {
-		return
+		return false
 	}
-	owner, ok := flowByNaturalKey[key]
-	if !ok || owner.ID == selfID {
-		return
+	owner := flowByNaturalKey[key]
+	return owner != nil && owner.ID != desired.ID
+}
+
+// releaseComponentChassisSlot clears a desired chassis pair from any other
+// Flow component before an INSERT or UPDATE claims it. Host BMC MAC is the
+// authoritative component identity, so a stale natural-key holder must not
+// prevent a label correction. Clearing first also permits transfers and swaps
+// to converge within one transaction. The unique index guarantees that at
+// most one other row can be changed.
+func releaseComponentChassisSlot(
+	ctx context.Context,
+	tx bun.Tx,
+	desired *model.Component,
+	now time.Time,
+) error {
+	if naturalKeyOrEmpty(desired.Manufacturer, desired.SerialNumber) == "" {
+		return nil
 	}
-	log.Warn().
-		Str("type", componentType).
-		Str("manufacturer", desired.Manufacturer).
-		Str("serial", desired.SerialNumber).
-		Str("held_by_component_id", owner.ID.String()).
-		Msg("Expected-inventory mirror: another Flow component already holds this manufacturer and serial number; mirroring this component without them")
-	desired.Manufacturer = ""
-	desired.SerialNumber = ""
+
+	query := tx.NewUpdate().
+		Model(&model.Component{}).
+		Set("manufacturer = NULL").
+		Set("serial_number = NULL").
+		Set("updated_at = ?", now).
+		Where("manufacturer = ?", desired.Manufacturer).
+		Where("serial_number = ?", desired.SerialNumber).
+		WhereAllWithDeleted()
+	if desired.ID != uuid.Nil {
+		query = query.Where("id <> ?", desired.ID)
+	}
+
+	updateResult, err := query.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("release chassis slot for component %q: %w", desired.Name, err)
+	}
+	rowsAffected, err := updateResult.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count released chassis slots for component %q: %w", desired.Name, err)
+	}
+	if rowsAffected > 1 {
+		return fmt.Errorf("release chassis slot for component %q affected %d rows, expected at most 1", desired.Name, rowsAffected)
+	}
+	if rowsAffected == 1 {
+		log.Info().
+			Str("component_id", desired.ID.String()).
+			Str("manufacturer", desired.Manufacturer).
+			Str("serial", desired.SerialNumber).
+			Msg("Expected-inventory mirror: released occupied chassis slot for authoritative component update")
+	}
+	return nil
 }
 
 // resolveRackID translates Core's rack_id string into the Flow Rack.ID
