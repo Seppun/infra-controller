@@ -16,19 +16,24 @@ import (
 )
 
 // ExtractRuleID peeks at the "rule_id" field in a serialized operation info
-// JSON blob. Returns nil if absent, empty, or unparseable.
-func ExtractRuleID(info json.RawMessage) *uuid.UUID {
+// JSON blob. An absent or empty field means no override; malformed persisted
+// JSON or a malformed rule ID is rejected instead of selecting a default rule.
+func ExtractRuleID(info json.RawMessage) (*uuid.UUID, error) {
 	var peek struct {
 		RuleID string `json:"rule_id"`
 	}
-	if err := json.Unmarshal(info, &peek); err != nil || peek.RuleID == "" {
-		return nil
+	err := json.Unmarshal(info, &peek)
+	if err != nil {
+		return nil, fmt.Errorf("decode operation info: %w", err)
+	}
+	if peek.RuleID == "" {
+		return nil, nil
 	}
 	parsed, err := uuid.Parse(peek.RuleID)
-	if err != nil {
-		return nil
+	if err != nil || parsed == uuid.Nil {
+		return nil, fmt.Errorf("rule_id %q must be a valid non-zero UUID", peek.RuleID)
 	}
-	return &parsed
+	return &parsed, nil
 }
 
 type Operation interface {
