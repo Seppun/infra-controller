@@ -573,8 +573,8 @@ func updateMirroredComponent(ctx context.Context, idb bun.IDB, component *model.
 		Model((*model.Component)(nil)).
 		Set("name = ?", component.Name).
 		Set("model = ?", component.Model).
-		Set("manufacturer = ?", component.Manufacturer).
-		Set("serial_number = ?", component.SerialNumber).
+		Set("manufacturer = NULLIF(?::text, '')", component.Manufacturer).
+		Set("serial_number = NULLIF(?::text, '')", component.SerialNumber).
 		Set("slot_id = ?", component.SlotID).
 		Set("tray_index = ?", component.TrayIndex).
 		Set("host_id = ?", component.HostID).

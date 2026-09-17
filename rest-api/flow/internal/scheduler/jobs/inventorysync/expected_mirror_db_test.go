@@ -780,6 +780,32 @@ func TestMirrorComponents_NoLabelsStillMirrored(t *testing.T) {
 	assert.Empty(t, got.SerialNumber)
 }
 
+// Clearing labels must store SQL NULL rather than empty strings so several
+// components can remain unlabelled without colliding on the unique index.
+func TestMirrorComponents_ClearingLabelsReleasesUniqueSlots(t *testing.T) {
+	ctx, pool := mirrorTestPool(t)
+
+	specs := []expectedComponentSpec{
+		computeSpec("Mfg", "C-CLEAR-1", "aa:bb:cc:dd:ee:45"),
+		computeSpec("Mfg", "C-CLEAR-2", "aa:bb:cc:dd:ee:46"),
+	}
+	mirrorExpectedComponents(ctx, pool, compType(), specs, map[string]uuid.UUID{})
+
+	for i := range specs {
+		specs[i].Manufacturer = ""
+		specs[i].SerialNumber = ""
+	}
+	mirrorExpectedComponents(ctx, pool, compType(), specs, map[string]uuid.UUID{})
+
+	nullLabels, err := pool.DB.NewSelect().
+		Model((*model.Component)(nil)).
+		Where("manufacturer IS NULL").
+		Where("serial_number IS NULL").
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, len(specs), nullLabels)
+}
+
 // Relabelling a chassis in Core must not fork the component: the host BMC MAC
 // is its identity, so the existing row is updated in place.
 func TestMirrorComponents_MatchByMACSurvivesRelabel(t *testing.T) {
