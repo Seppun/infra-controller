@@ -542,7 +542,9 @@ impl ApiEndpointSource {
             }
             Err(error) => {
                 tracing::warn!(?error, "Failed to fetch power shelf endpoints");
-                inventory_error = Some(error);
+                if inventory_error.is_none() {
+                    inventory_error = Some(error);
+                }
             }
         }
         match self.fetch_switch_endpoints().await {

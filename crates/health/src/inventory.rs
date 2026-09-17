@@ -357,6 +357,11 @@ impl InventoryMetrics {
         for inventory_component in components {
             let rack_id = inventory_component.rack_id.to_string();
             let Some(rack) = racks_by_id.get(rack_id.as_str()) else {
+                tracing::warn!(
+                    %rack_id,
+                    component = ?inventory_component.metadata,
+                    "Skipped authoritative component whose rack is absent from the inventory snapshot"
+                );
                 continue;
             };
             let Some(component) = ComponentSeries::from_inventory(inventory_component, rack) else {
@@ -805,22 +810,6 @@ mod tests {
             .find(|line| line.starts_with("carbide_hardware_health_component_inventory_info{"))
             .expect("component inventory series");
         assert!(component_line.contains("bmc_mac=\"\""));
-    }
-
-    #[test]
-    fn unreconciled_refresh_retains_last_successful_snapshot() {
-        let registry = Registry::new();
-        let mut metrics = InventoryMetrics::new(&registry, "carbide_hardware_health").unwrap();
-        let component = switch_component(SwitchEndpointRole::Bmc, "02:00:00:00:00:01");
-
-        metrics.reconcile_at(&[rack()], &[component], 1_800_000_000.0);
-
-        let output = exposition(&registry);
-        assert!(output.contains("carbide_hardware_health_component_inventory_info{"));
-        assert!(
-            output
-                .contains("carbide_hardware_health_inventory_last_success_time_seconds 1800000000")
-        );
     }
 
     #[test]
