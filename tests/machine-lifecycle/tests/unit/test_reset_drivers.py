@@ -306,17 +306,29 @@ def test_lenovo_bios_task_timeout_keeps_maintenance_policy(monkeypatch):
         "post",
         lambda *_args, **_kwargs: _Response(202, {"Id": "task-1"}),
     )
-    monkeypatch.setattr(
-        lenovo.requests,
-        "get",
-        lambda *_args, **_kwargs: _Response(200, {"TaskState": "Running"}),
-    )
-    monkeypatch.setattr(lenovo.time, "sleep", lambda _seconds: None)
+    timeouts = []
+
+    def get(_url, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return _Response(200, {"TaskState": "Running"})
+
+    monkeypatch.setattr(lenovo.requests, "get", get)
+    sleeps = []
+    monkeypatch.setattr(lenovo.time, "sleep", sleeps.append)
+    # Deadline set at t=0. The clock is read before each poll and again to cap
+    # the sleep: polls at t=0, 100 and 250 proceed, t=400 raises without another
+    # request.
+    clock = iter([0.0, 0.0, 5.0, 100.0, 105.0, 250.0, 255.0, 400.0])
+    monkeypatch.setattr(lenovo.time, "monotonic", lambda: next(clock))
 
     with pytest.raises(ResetDriverError, match="did not complete") as raised:
         lenovo.LenovoHostResetDriver().reset_host(_target())
 
     assert raised.value.set_maintenance is True
+    # The deadline, not a poll count, ends the wait: three polls, three sleeps,
+    # and no fourth request. The last poll had 50s left, so its timeout shrank.
+    assert timeouts == [60, 60, 50]
+    assert sleeps == [10, 10, 10]
 
 
 @pytest.mark.parametrize(

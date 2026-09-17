@@ -24,6 +24,7 @@ from lib import admin_cli, network
 from .base import ResetDriverError, ResetTarget
 
 REDFISH_TIMEOUT_SECONDS = 60
+TASK_DEADLINE_SECONDS = 300
 
 
 class LenovoHostResetDriver:
@@ -52,10 +53,17 @@ class LenovoHostResetDriver:
             ) from error
         if response.status_code == 202:
             task_id = response.json()["Id"]
-            attempts = 0
-            max_attempts = 30
+            # One deadline covering request time and sleeps, so the bound is the
+            # five minutes the error reports rather than 30 slow polls.
+            deadline = time.monotonic() + TASK_DEADLINE_SECONDS
             print(f"Waiting for async redfish task {task_id} to complete")
-            while attempts < max_attempts:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ResetDriverError(
+                        "Redfish task did not complete in 5 minutes",
+                        set_maintenance=True,
+                    )
                 task_url = (
                     f"https://{target.bmc_ip}/redfish/v1/TaskService/Tasks/{task_id}"
                 )
@@ -64,7 +72,7 @@ class LenovoHostResetDriver:
                         task_url,
                         auth=(target.credentials.username, target.credentials.password),
                         verify=False,
-                        timeout=REDFISH_TIMEOUT_SECONDS,
+                        timeout=min(REDFISH_TIMEOUT_SECONDS, remaining),
                     )
                 except requests.RequestException as error:
                     raise ResetDriverError(
@@ -86,13 +94,7 @@ class LenovoHostResetDriver:
                     "Redfish task not yet completed, state "
                     f"{response.json()['TaskState']}"
                 )
-                attempts += 1
-                time.sleep(10)
-            else:
-                raise ResetDriverError(
-                    "Redfish task did not complete in 5 minutes",
-                    set_maintenance=True,
-                )
+                time.sleep(min(10, max(0.0, deadline - time.monotonic())))
         else:
             print(response.text)
             raise ResetDriverError(
