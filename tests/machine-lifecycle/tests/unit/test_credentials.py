@@ -32,6 +32,8 @@ def isolate_credential_environment(monkeypatch, tmp_path):
     ~/.vault-token and passes only on a machine that has one.
     """
     monkeypatch.delenv("VAULT_TOKEN", raising=False)
+    monkeypatch.delenv("OAUTH_CREDENTIAL", raising=False)
+    monkeypatch.delenv("VAULT_JWT_TOKEN", raising=False)
     monkeypatch.setattr(
         credentials, "DEFAULT_VAULT_TOKEN_FILE", str(tmp_path / "absent-vault-token")
     )

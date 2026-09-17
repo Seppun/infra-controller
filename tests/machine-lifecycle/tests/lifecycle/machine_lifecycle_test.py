@@ -88,6 +88,7 @@ HOST_RESET_DRIVERS: dict[str, HostResetDriver] = {
 DPU_RESET_DRIVER: DpuResetDriver = BlueFieldDpuResetDriver()
 
 TIMEOUT_EXCEPTIONS = (TimeoutError, subprocess.TimeoutExpired, requests.Timeout)
+BMC_PROBE_TIMEOUT_SECONDS = 30
 
 
 def _restart_request_expected(test_config: Config) -> bool:
@@ -668,6 +669,7 @@ def _resolve_lenovo_host_bmc_username(
         url,
         auth=(credentials.username, credentials.password),
         verify=False,
+        timeout=BMC_PROBE_TIMEOUT_SECONDS,
     )
     if response.status_code == 401 and credentials.username == "USERID":
         print(
@@ -680,6 +682,7 @@ def _resolve_lenovo_host_bmc_username(
             url,
             auth=(credentials.username, credentials.password),
             verify=False,
+            timeout=BMC_PROBE_TIMEOUT_SECONDS,
         )
     if not response.ok:
         _error_and_exit(

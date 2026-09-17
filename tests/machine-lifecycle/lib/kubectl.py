@@ -21,6 +21,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+KUBECTL_TIMEOUT_SECONDS = 120
+
 
 @dataclass(frozen=True)
 class PodContainer:
@@ -100,13 +102,15 @@ def _deployment_pods(namespace: str, deployment: str, timeout: int | None = None
     return [item for item in items if isinstance(item, dict)]
 
 
-def get_deployment_pod(namespace: str, deployment: str) -> str:
+def get_deployment_pod(
+    namespace: str, deployment: str, timeout: int = KUBECTL_TIMEOUT_SECONDS
+) -> str:
     """Return the name of one ready pod belonging to a deployment.
 
     Callers that write into a pod and later execute in it must address the same
     pod both times, which ``deployment/<name>`` does not guarantee.
     """
-    items = _deployment_pods(namespace, deployment)
+    items = _deployment_pods(namespace, deployment, timeout=timeout)
 
     ready_pods = sorted(
         name
@@ -220,7 +224,9 @@ def _ready_pod_name(pod: object) -> str | None:
     return name if ready and isinstance(name, str) and name else None
 
 
-def write_pod_file(namespace: str, pod: str, path: str, content: str) -> None:
+def write_pod_file(
+    namespace: str, pod: str, path: str, content: str, timeout: int = KUBECTL_TIMEOUT_SECONDS
+) -> None:
     """Write a file inside a pod, readable only by its owner.
 
     The content goes over stdin, so it never enters the pod's process table.
@@ -246,7 +252,12 @@ def write_pod_file(namespace: str, pod: str, path: str, content: str) -> None:
     # Encoding pinned on both sides. Left to the locale, stdin would be encoded
     # one way and counted another, failing a correct write of non-ASCII content.
     result = subprocess.run(
-        command, input=content, capture_output=True, text=True, encoding="utf-8"
+        command,
+        input=content,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=timeout,
     )
     if result.returncode:
         detail = result.stderr.strip() or "no detail"
@@ -268,7 +279,9 @@ def write_pod_file(namespace: str, pod: str, path: str, content: str) -> None:
         )
 
 
-def remove_pod_path(namespace: str, pod: str, path: str) -> None:
+def remove_pod_path(
+    namespace: str, pod: str, path: str, timeout: int = KUBECTL_TIMEOUT_SECONDS
+) -> None:
     """Remove a path inside a pod, recursively and without failing if absent."""
     command = [
         "kubectl",
@@ -283,7 +296,7 @@ def remove_pod_path(namespace: str, pod: str, path: str) -> None:
         path,
     ]
     print(f"Executing {command}")
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         detail = result.stderr.strip() or "no detail"
         raise RuntimeError(f"Could not remove {path} in {namespace}/{pod}: {detail}")

@@ -427,6 +427,10 @@ MLT generates an Ed25519 key for each run, places only its public key in the
 temporary OS definition's cloud-init, and keeps the private key in memory. Root
 login and password authentication are disabled by default.
 
+The image is installed with a fixed, publicly known LUKS passphrase, so this
+provisioning profile provides no disk confidentiality. The instance exists
+only for the duration of the run and is deleted with it.
+
 ## Artifacts, failure handling, and cleanup
 
 - Normal completion deletes the instance, temporary OS definition, and network

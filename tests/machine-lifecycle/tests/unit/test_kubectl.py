@@ -174,6 +174,7 @@ def _write_pod_file_run(monkeypatch, stdout, returncode=0, stderr=""):
         calls["command"] = command
         calls["input"] = kwargs.get("input")
         calls["encoding"] = kwargs.get("encoding")
+        calls["timeout"] = kwargs.get("timeout")
         return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
 
     monkeypatch.setattr(kubectl.subprocess, "run", fake_run)
@@ -194,6 +195,54 @@ def test_write_pod_file_sends_content_over_stdin_and_checks_the_size(monkeypatch
     assert calls["command"][:8] == [
         "kubectl", "exec", "-i", "-n", "ns", "pod-1", "--", "sh",
     ]
+    assert calls["timeout"] == kubectl.KUBECTL_TIMEOUT_SECONDS
+
+
+def test_remove_pod_path_is_bounded(monkeypatch):
+    recorded = {}
+
+    def fake_run(command, **kwargs):
+        recorded["command"] = command
+        recorded["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(kubectl.subprocess, "run", fake_run)
+
+    kubectl.remove_pod_path("ns", "pod-1", "/dev/shm/mlt-a")
+
+    assert recorded["command"][-4:] == ["rm", "-rf", "--", "/dev/shm/mlt-a"]
+    assert recorded["timeout"] == kubectl.KUBECTL_TIMEOUT_SECONDS
+
+
+def test_get_deployment_pod_bounds_both_kubectl_calls(monkeypatch):
+    responses = iter(
+        [
+            {"spec": {"selector": {"matchLabels": {"app": "nico"}}}},
+            {
+                "items": [
+                    {
+                        "metadata": {"name": "api-a"},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                        },
+                    }
+                ]
+            },
+        ]
+    )
+    timeouts = []
+
+    def fake_run(command, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(next(responses)), stderr=""
+        )
+
+    monkeypatch.setattr(kubectl.subprocess, "run", fake_run)
+
+    assert kubectl.get_deployment_pod("ns", "api") == "api-a"
+    assert timeouts == [kubectl.KUBECTL_TIMEOUT_SECONDS] * 2
 
 
 def test_write_pod_file_rejects_a_short_write(monkeypatch):

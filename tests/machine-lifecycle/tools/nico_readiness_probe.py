@@ -31,7 +31,7 @@ Imports the repo's own lib/, so it exercises the same code paths the test does
 rather than a parallel implementation. Run it from the checkout, or from /test
 in the MLT image:
 
-    uv run python nico_readiness_probe.py
+    uv run python tools/nico_readiness_probe.py
 """
 
 from __future__ import annotations

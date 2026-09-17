@@ -15,10 +15,12 @@
 
 import json
 import time
-from datetime import datetime
 from typing import Literal
 
 import requests
+
+REDFISH_TIMEOUT_SECONDS = 60
+GRACEFUL_SHUTDOWN_SECONDS = 300
 
 
 class DellFactoryResetError(Exception):
@@ -43,6 +45,7 @@ class DellFactoryResetMethods:
             json=payload,
             headers=headers,
             verify=False,
+            timeout=REDFISH_TIMEOUT_SECONDS,
             auth=(self.host_bmc_username, self.host_bmc_password),
         )
         if response.status_code == 200:
@@ -68,17 +71,20 @@ class DellFactoryResetMethods:
                 response = requests.get(
                     "https://%s/redfish/v1/Systems/System.Embedded.1" % self.host_bmc_ip,
                     verify=False,
+                    timeout=REDFISH_TIMEOUT_SECONDS,
                     auth=(self.host_bmc_username, self.host_bmc_password),
                 )
-                data = response.json()
-                break
+                return response.json()
             except json.decoder.JSONDecodeError:
                 print(
                     "Error: Failed to decode JSON response from Redfish API. Retrying in "
                     "5 seconds..."
                 )
                 time.sleep(5)
-        return data
+        raise DellFactoryResetError(
+            f"Could not read server status from {self.host_bmc_ip}: "
+            "no valid Redfish response after 10 attempts"
+        )
 
     def reboot_server(self):
         data = self._get_server_status()
@@ -95,6 +101,7 @@ class DellFactoryResetMethods:
                 json=payload,
                 headers=headers,
                 verify=False,
+                timeout=REDFISH_TIMEOUT_SECONDS,
                 auth=(self.host_bmc_username, self.host_bmc_password),
             )
             if response.status_code == 204:
@@ -108,7 +115,7 @@ class DellFactoryResetMethods:
                     "shutdown will be invoked in 5 minutes"
                 )
                 time.sleep(15)
-                start_time = datetime.now()
+                deadline = time.monotonic() + GRACEFUL_SHUTDOWN_SECONDS
             else:
                 print(
                     f"\n- FAIL, Command failed to gracefully power OFF server, status code is: "
@@ -123,17 +130,17 @@ class DellFactoryResetMethods:
                 response = requests.get(
                     "https://%s/redfish/v1/Systems/System.Embedded.1" % self.host_bmc_ip,
                     verify=False,
+                    timeout=REDFISH_TIMEOUT_SECONDS,
                     auth=(self.host_bmc_username, self.host_bmc_password),
                 )
                 data = response.json()
-                current_time = str(datetime.now() - start_time)[0:7]
                 if data["PowerState"] == "Off":
                     print(
                         "- PASS, GET command passed to verify graceful shutdown was successful and "
                         "server is in OFF state"
                     )
                     break
-                elif current_time >= "0:05:00":
+                elif time.monotonic() >= deadline:
                     print(
                         "- INFO, unable to perform graceful shutdown, server will now perform "
                         "forced shutdown"
@@ -145,6 +152,7 @@ class DellFactoryResetMethods:
                         json=payload,
                         headers=headers,
                         verify=False,
+                        timeout=REDFISH_TIMEOUT_SECONDS,
                         auth=(self.host_bmc_username, self.host_bmc_password),
                     )
                     if response.status_code == 204:
@@ -156,6 +164,7 @@ class DellFactoryResetMethods:
                         response = requests.get(
                             "https://%s/redfish/v1/Systems/System.Embedded.1" % self.host_bmc_ip,
                             verify=False,
+                            timeout=REDFISH_TIMEOUT_SECONDS,
                             auth=(self.host_bmc_username, self.host_bmc_password),
                         )
                         data = response.json()
@@ -174,8 +183,12 @@ class DellFactoryResetMethods:
                                 f"Dell forced shutdown did not result in OFF state. "
                                 f"Current state: {data['PowerState']}"
                             )
+                    else:
+                        raise DellFactoryResetError(
+                            f"Dell forced shutdown failed, status code {response.status_code}"
+                        )
                 else:
-                    continue
+                    time.sleep(15)
             payload = {"ResetType": "On"}
             headers = {"content-type": "application/json"}
             response = requests.post(
@@ -183,6 +196,7 @@ class DellFactoryResetMethods:
                 json=payload,
                 headers=headers,
                 verify=False,
+                timeout=REDFISH_TIMEOUT_SECONDS,
                 auth=(self.host_bmc_username, self.host_bmc_password),
             )
             if response.status_code == 204:
@@ -212,6 +226,7 @@ class DellFactoryResetMethods:
                 json=payload,
                 headers=headers,
                 verify=False,
+                timeout=REDFISH_TIMEOUT_SECONDS,
                 auth=(self.host_bmc_username, self.host_bmc_password),
             )
             if response.status_code == 204:
@@ -250,6 +265,7 @@ class DellFactoryResetMethods:
                 json=payload,
                 auth=(self.host_bmc_username, self.host_bmc_password),
                 verify=False,
+                timeout=REDFISH_TIMEOUT_SECONDS,
             )
             if response.status_code != 200:
                 print(f"Unlocking iDRAC failed. Status code: {response.status_code}")
@@ -269,6 +285,7 @@ class DellFactoryResetMethods:
             json=payload,
             auth=(self.host_bmc_username, self.host_bmc_password),
             verify=False,
+            timeout=REDFISH_TIMEOUT_SECONDS,
         )
         if response.status_code != 200:
             print(f"Disabling host header check failed. Status code: {response.status_code}")
@@ -293,6 +310,7 @@ class DellFactoryResetMethods:
             json=payload,
             headers=headers,
             verify=False,
+            timeout=REDFISH_TIMEOUT_SECONDS,
             auth=(self.host_bmc_username, self.host_bmc_password),
         )
         if response.status_code == 200:
@@ -322,6 +340,7 @@ class DellFactoryResetMethods:
                 json=payload,
                 auth=(self.host_bmc_username, self.host_bmc_password),
                 verify=False,
+                timeout=REDFISH_TIMEOUT_SECONDS,
             )
             if response.status_code == 200:
                 print("- PASS, iDRAC root password changed successfully")

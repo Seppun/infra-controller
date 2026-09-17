@@ -23,6 +23,8 @@ from lib import admin_cli, network
 
 from .base import ResetDriverError, ResetTarget
 
+REDFISH_TIMEOUT_SECONDS = 60
+
 
 class BlueFieldDpuResetDriver:
     """Perform the existing BlueField BIOS and BMC reset sequence."""
@@ -32,12 +34,19 @@ class BlueFieldDpuResetDriver:
         url = f"https://{target.bmc_ip}/redfish/v1/Systems/Bluefield/Bios/Settings"
         data = {"Attributes": {"ResetEfiVars": True}}
         print(f"Executing redfish request. \nPayload: {data} \nURL: {url}")
-        response = requests.patch(
-            url,
-            json=data,
-            auth=(target.credentials.username, target.credentials.password),
-            verify=False,
-        )
+        try:
+            response = requests.patch(
+                url,
+                json=data,
+                auth=(target.credentials.username, target.credentials.password),
+                verify=False,
+                timeout=REDFISH_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as error:
+            raise ResetDriverError(
+                f"Failed to reach the {target.label} BMC for a BIOS reset: {error}",
+                set_maintenance=True,
+            ) from error
         if response.status_code != 200:
             print(response.text)
             raise ResetDriverError(

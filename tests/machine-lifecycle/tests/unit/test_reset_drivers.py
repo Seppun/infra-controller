@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from lib.reset_drivers import ResetDriverError, ResetTarget
+from lib import dell_factory_reset
 from lib.reset_drivers import bluefield, dell, gb200, lenovo
 from lib.site_vault import BmcCredentials
 from tests.lifecycle import machine_lifecycle_test as lifecycle
@@ -98,6 +100,7 @@ def test_bluefield_driver_preserves_bios_restart_factory_reset_order(monkeypatch
                 "json": {"Attributes": {"ResetEfiVars": True}},
                 "auth": ("operator", "secret"),
                 "verify": False,
+                "timeout": 60,
             },
         ),
         ("restart-bmc", "dpu-id"),
@@ -107,6 +110,23 @@ def test_bluefield_driver_preserves_bios_restart_factory_reset_order(monkeypatch
         ("sleep", 5),
         ("wait-redfish", {"hostname": "192.0.2.10", "sleep_time": 10}),
     ]
+
+
+def test_bluefield_unreachable_bmc_keeps_maintenance_policy_and_stops(monkeypatch):
+    def patch(*_args, **_kwargs):
+        raise bluefield.requests.ConnectTimeout("no route to BMC")
+
+    monkeypatch.setattr(bluefield.requests, "patch", patch)
+    monkeypatch.setattr(
+        bluefield.admin_cli,
+        "restart_bmc",
+        lambda *_args: pytest.fail("BMC restart must not follow an unreachable BMC"),
+    )
+
+    with pytest.raises(ResetDriverError, match="DPU1") as raised:
+        bluefield.BlueFieldDpuResetDriver().reset_dpu(_target(label="DPU1"))
+
+    assert raised.value.set_maintenance is True
 
 
 def test_bluefield_bios_failure_keeps_maintenance_policy_and_stops(monkeypatch):
@@ -219,19 +239,20 @@ def test_lenovo_driver_waits_for_bios_task_before_later_steps(monkeypatch):
                 "json": {"ResetType": "default"},
                 "auth": ("operator", "secret"),
                 "verify": False,
+                "timeout": 60,
             },
         ),
         (
             "poll-task",
             "https://192.0.2.10/redfish/v1/TaskService/Tasks/task-1",
-            {"auth": ("operator", "secret"), "verify": False},
+            {"auth": ("operator", "secret"), "verify": False, "timeout": 60},
             "Running",
         ),
         ("sleep", 10),
         (
             "poll-task",
             "https://192.0.2.10/redfish/v1/TaskService/Tasks/task-1",
-            {"auth": ("operator", "secret"), "verify": False},
+            {"auth": ("operator", "secret"), "verify": False, "timeout": 60},
             "Completed",
         ),
         ("clear-password", "machine-id"),
@@ -305,6 +326,75 @@ def test_lenovo_driver_translates_recovery_wait_failures(
         lenovo.LenovoHostResetDriver().reset_host(_target())
 
     assert raised.value.set_maintenance is True
+
+
+def _dell_methods() -> dell_factory_reset.DellFactoryResetMethods:
+    return dell_factory_reset.DellFactoryResetMethods("192.0.2.10", "root", "secret")
+
+
+def test_dell_server_status_fails_cleanly_after_exhausting_retries(monkeypatch):
+    class _Undecodable:
+        status_code = 200
+
+        def json(self):
+            raise json.JSONDecodeError("not json", "", 0)
+
+    monkeypatch.setattr(dell_factory_reset.requests, "get", lambda *_args, **_kwargs: _Undecodable())
+    monkeypatch.setattr(dell_factory_reset.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(dell_factory_reset.DellFactoryResetError, match="after 10 attempts"):
+        _dell_methods()._get_server_status()
+
+
+def test_dell_reboot_paces_its_shutdown_polls_and_forces_off_at_the_deadline(monkeypatch):
+    # Initial status, two polls still On, then Off after the forced shutdown.
+    power_states = iter(["On", "On", "On", "Off"])
+    clock = iter([0.0, 100.0, 400.0])
+    posts = []
+    sleeps = []
+
+    monkeypatch.setattr(
+        dell_factory_reset.requests,
+        "get",
+        lambda *_args, **_kwargs: _Response(200, {"PowerState": next(power_states)}),
+    )
+
+    def post(_url, **kwargs):
+        posts.append(kwargs["json"]["ResetType"])
+        return _Response(204)
+
+    monkeypatch.setattr(dell_factory_reset.requests, "post", post)
+    monkeypatch.setattr(dell_factory_reset.time, "sleep", sleeps.append)
+    monkeypatch.setattr(dell_factory_reset.time, "monotonic", lambda: next(clock))
+
+    _dell_methods().reboot_server()
+
+    assert posts == ["GracefulShutdown", "ForceOff", "On"]
+    # Settle after the graceful request, pause between polls, settle after ForceOff.
+    assert sleeps == [15, 15, 15]
+
+
+def test_dell_reboot_fails_when_the_forced_shutdown_is_rejected(monkeypatch):
+    power_states = iter(["On", "On"])
+    clock = iter([0.0, 400.0])
+
+    monkeypatch.setattr(
+        dell_factory_reset.requests,
+        "get",
+        lambda *_args, **_kwargs: _Response(200, {"PowerState": next(power_states)}),
+    )
+    monkeypatch.setattr(
+        dell_factory_reset.requests,
+        "post",
+        lambda _url, **kwargs: _Response(
+            204 if kwargs["json"]["ResetType"] == "GracefulShutdown" else 500
+        ),
+    )
+    monkeypatch.setattr(dell_factory_reset.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(dell_factory_reset.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(dell_factory_reset.DellFactoryResetError, match="forced shutdown failed"):
+        _dell_methods().reboot_server()
 
 
 def test_dell_driver_preserves_existing_method_and_wait_order(monkeypatch):

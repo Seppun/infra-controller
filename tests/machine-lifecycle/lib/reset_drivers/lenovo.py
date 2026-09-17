@@ -23,6 +23,8 @@ from lib import admin_cli, network
 
 from .base import ResetDriverError, ResetTarget
 
+REDFISH_TIMEOUT_SECONDS = 60
+
 
 class LenovoHostResetDriver:
     """Perform the existing Lenovo BIOS, reboot, and BMC reset sequence."""
@@ -40,6 +42,7 @@ class LenovoHostResetDriver:
             json=data,
             auth=(target.credentials.username, target.credentials.password),
             verify=False,
+            timeout=REDFISH_TIMEOUT_SECONDS,
         )
         if response.status_code == 202:
             task_id = response.json()["Id"]
@@ -54,6 +57,7 @@ class LenovoHostResetDriver:
                     task_url,
                     auth=(target.credentials.username, target.credentials.password),
                     verify=False,
+                    timeout=REDFISH_TIMEOUT_SECONDS,
                 )
                 if response.status_code != 200:
                     print(response.text)

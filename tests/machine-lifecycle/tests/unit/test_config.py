@@ -1004,7 +1004,8 @@ vault_token = "never-put-a-secret-here"
 
 
 def test_the_example_config_documents_every_supported_oauth_key():
-    example = Path("config/config.example.toml").read_text(encoding="utf-8")
+    example_path = Path(__file__).resolve().parents[2] / "config" / "config.example.toml"
+    example = example_path.read_text(encoding="utf-8")
     documented = {
         line.split("=", 1)[0].strip()
         for line in example.splitlines()
