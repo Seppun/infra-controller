@@ -1100,6 +1100,7 @@ NvLink partitioning via NMX-C is gated on `[nvlink_config]`:
 ```toml
 [nvlink_config]
 enabled = true
+domain_discovery_enabled = false
 monitor_run_interval = "60s"
 nmxc_endpoint = "https://nmxc.example.com"
 # Plus auth + retry settings — see the canonical reference.
@@ -1108,6 +1109,10 @@ nmxc_endpoint = "https://nmxc.example.com"
 When enabled, NICo reads NvLink partition state from NMX-C and reconciles
 it with the rack-level state machine. See
 [`crates/api-core/src/cfg/README.md` → NvLinkConfig](../../../crates/api-core/src/cfg/README.md#nvlinkconfig).
+
+Set `enabled = false` and `domain_discovery_enabled = true` to record the
+domain returned by each rack's NMX-C endpoint without reconciling partitions.
+The read-only mode reuses `monitor_run_interval` and the NMX-C TLS settings.
 
 ---
 
@@ -1475,6 +1480,7 @@ on or off.
 | Hardware-health telemetry | Helm | `nico-hardware-health.telemetryServiceMonitor.enabled` | off | Enable for per-machine sensor metrics (temperature, power, fans). |
 | IB Fabric Monitor | siteConfig | `[ib_config].enabled` | off | Sites running InfiniBand fabrics managed by UFM. |
 | NvLink Monitor | siteConfig | `[nvlink_config].enabled` | off | GB200/GB300 sites using NMX-C for NvLink partitioning. |
+| NvLink domain discovery | siteConfig | `[nvlink_config].domain_discovery_enabled` | off | Sites that need authoritative rack-to-domain metadata without automated partition reconciliation. |
 | DSX Exchange Event Bus | siteConfig | `[dsx_exchange_event_bus]` present | off | Pairs with the `nico-dsx-exchange-consumer` chart. Requires MQTT broker. |
 | DPA (Cluster Interconnect) | siteConfig | `[dpa_config].enabled` | off | East-west Ethernet cluster networking; requires MQTT broker. |
 | FNN (L3 VPC overlay) | siteConfig | `[fnn]` present | off | Tenant VPC networking via VXLAN; needs `routing_profiles` and route targets. |

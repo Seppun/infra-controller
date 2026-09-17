@@ -26,6 +26,13 @@ pub struct NvLinkConfig {
     #[serde(default)]
     pub enabled: bool,
 
+    /// Enables read-only discovery of rack NVLink domains through NMX-C Hello.
+    ///
+    /// This has no effect when `enabled` is true because the partition monitor
+    /// already records the domain observed from each rack's NMX-C endpoint.
+    #[serde(default)]
+    pub domain_discovery_enabled: bool,
+
     /// Defaults to 1 Minute if not specified.
     #[serde(
         default = "NvLinkConfig::default_monitor_run_interval",
@@ -135,6 +142,7 @@ impl Default for NvLinkConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            domain_discovery_enabled: false,
             monitor_run_interval: Self::default_monitor_run_interval(),
             nmx_c_tls_ca_cert_path: None,
             nmx_c_tls_client_cert_path: None,
@@ -155,14 +163,19 @@ mod test {
 
     #[test]
     fn deserialize_serialize_nvlink_config() {
-        let value_json =
-            r#"{"enabled": true, "allow_insecure": true, "monitor_run_interval": "33" }"#;
+        let value_json = r#"{
+            "enabled": true,
+            "domain_discovery_enabled": true,
+            "allow_insecure": true,
+            "monitor_run_interval": "33"
+        }"#;
 
         let nvlink_config: NvLinkConfig = serde_json::from_str(value_json).unwrap();
         assert_eq!(
             nvlink_config,
             NvLinkConfig {
                 enabled: true,
+                domain_discovery_enabled: true,
                 monitor_run_interval: std::time::Duration::from_secs(33),
                 nmx_c_tls_ca_cert_path: None,
                 nmx_c_tls_client_cert_path: None,
@@ -175,6 +188,53 @@ mod test {
                     NvLinkConfig::default_partition_monitor_max_concurrent_groups(),
             }
         );
+    }
+
+    #[test]
+    fn domain_discovery_defaults_to_disabled_when_omitted() {
+        let config: NvLinkConfig = serde_json::from_str(r#"{"allow_insecure":false}"#).unwrap();
+
+        assert!(!config.enabled);
+        assert!(!config.domain_discovery_enabled);
+        assert!(!config.allow_insecure);
+    }
+
+    #[test]
+    fn deserialize_secure_read_only_domain_discovery() {
+        let config: NvLinkConfig = serde_json::from_str(
+            r#"{
+                "enabled": false,
+                "domain_discovery_enabled": true,
+                "allow_insecure": false,
+                "nmx_c_tls_ca_cert_path": "/tls/ca.crt",
+                "nmx_c_tls_client_cert_path": "/tls/client.crt",
+                "nmx_c_tls_client_key_path": "/tls/client.key",
+                "nmx_c_tls_authority": "nmxc.example.internal",
+                "nmx_c_endpoint_port": 9370
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!config.enabled);
+        assert!(config.domain_discovery_enabled);
+        assert!(!config.allow_insecure);
+        assert_eq!(
+            config.nmx_c_tls_ca_cert_path.as_deref(),
+            Some("/tls/ca.crt")
+        );
+        assert_eq!(
+            config.nmx_c_tls_client_cert_path.as_deref(),
+            Some("/tls/client.crt")
+        );
+        assert_eq!(
+            config.nmx_c_tls_client_key_path.as_deref(),
+            Some("/tls/client.key")
+        );
+        assert_eq!(
+            config.nmx_c_tls_authority.as_deref(),
+            Some("nmxc.example.internal")
+        );
+        assert_eq!(config.nmx_c_endpoint_port, Some(9370));
     }
 
     #[test]
