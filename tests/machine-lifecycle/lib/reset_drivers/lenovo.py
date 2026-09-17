@@ -37,13 +37,19 @@ class LenovoHostResetDriver:
         )
         data = {"ResetType": "default"}
         print(f"Executing redfish request. \nData: {data} \nURL: {url}")
-        response = requests.post(
-            url,
-            json=data,
-            auth=(target.credentials.username, target.credentials.password),
-            verify=False,
-            timeout=REDFISH_TIMEOUT_SECONDS,
-        )
+        try:
+            response = requests.post(
+                url,
+                json=data,
+                auth=(target.credentials.username, target.credentials.password),
+                verify=False,
+                timeout=REDFISH_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as error:
+            raise ResetDriverError(
+                f"Failed to reach the {target.label} BMC for a BIOS reset: {error}",
+                set_maintenance=True,
+            ) from error
         if response.status_code == 202:
             task_id = response.json()["Id"]
             attempts = 0
@@ -53,12 +59,19 @@ class LenovoHostResetDriver:
                 task_url = (
                     f"https://{target.bmc_ip}/redfish/v1/TaskService/Tasks/{task_id}"
                 )
-                response = requests.get(
-                    task_url,
-                    auth=(target.credentials.username, target.credentials.password),
-                    verify=False,
-                    timeout=REDFISH_TIMEOUT_SECONDS,
-                )
+                try:
+                    response = requests.get(
+                        task_url,
+                        auth=(target.credentials.username, target.credentials.password),
+                        verify=False,
+                        timeout=REDFISH_TIMEOUT_SECONDS,
+                    )
+                except requests.RequestException as error:
+                    raise ResetDriverError(
+                        f"Lost contact with the {target.label} BMC while waiting for "
+                        f"Redfish task {task_id}: {error}",
+                        set_maintenance=True,
+                    ) from error
                 if response.status_code != 200:
                     print(response.text)
                     raise ResetDriverError(

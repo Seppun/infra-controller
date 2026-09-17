@@ -265,6 +265,41 @@ def test_lenovo_driver_waits_for_bios_task_before_later_steps(monkeypatch):
     ]
 
 
+def test_lenovo_unreachable_bmc_keeps_maintenance_policy_and_stops(monkeypatch):
+    def post(*_args, **_kwargs):
+        raise lenovo.requests.ConnectTimeout("no route to BMC")
+
+    monkeypatch.setattr(lenovo.requests, "post", post)
+    monkeypatch.setattr(
+        lenovo.admin_cli,
+        "clear_host_bios_password",
+        lambda *_args: pytest.fail("later steps must not follow an unreachable BMC"),
+    )
+
+    with pytest.raises(ResetDriverError, match="host") as raised:
+        lenovo.LenovoHostResetDriver().reset_host(_target())
+
+    assert raised.value.set_maintenance is True
+
+
+def test_lenovo_lost_bmc_during_task_poll_keeps_maintenance_policy(monkeypatch):
+    monkeypatch.setattr(
+        lenovo.requests,
+        "post",
+        lambda *_args, **_kwargs: _Response(202, {"Id": "task-1"}),
+    )
+
+    def get(*_args, **_kwargs):
+        raise lenovo.requests.ConnectionError("connection reset")
+
+    monkeypatch.setattr(lenovo.requests, "get", get)
+
+    with pytest.raises(ResetDriverError, match="task-1") as raised:
+        lenovo.LenovoHostResetDriver().reset_host(_target())
+
+    assert raised.value.set_maintenance is True
+
+
 def test_lenovo_bios_task_timeout_keeps_maintenance_policy(monkeypatch):
     monkeypatch.setattr(
         lenovo.requests,
