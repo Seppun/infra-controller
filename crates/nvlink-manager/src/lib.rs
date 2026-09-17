@@ -39,7 +39,7 @@ use db::machine::find_machine_ids;
 use db::managed_host::load_by_machine_ids;
 use db::nvl_logical_partition::IdColumn as LpIdColumn;
 use db::nvl_partition::IdColumn;
-use db::work_lock_manager::WorkLockManagerHandle;
+use db::work_lock_manager::{WorkLock, WorkLockManagerHandle};
 use db::{self, ObjectColumnFilter, TransactionVending, machine};
 use errors::{NvLinkManagerError, NvLinkManagerResult};
 use futures::future;
@@ -1165,8 +1165,6 @@ fn nvl_monitor_mode(config: &NvLinkConfig) -> Option<NvlMonitorMode> {
 
 impl NvlPartitionMonitor {
     const ITERATION_WORK_KEY: &'static str = "NvlPartitionMonitor::run_single_iteration";
-    const DOMAIN_DISCOVERY_WORK_KEY: &'static str =
-        "NvlPartitionMonitor::run_domain_discovery_single_iteration";
 
     pub fn new(
         db_pool: PgPool,
@@ -1246,7 +1244,15 @@ impl NvlPartitionMonitor {
         let timer = PeriodicTimer::new(self.config.monitor_run_interval);
         loop {
             let tick = timer.tick();
-            if let Err(error) = self.run_domain_discovery_single_iteration().await {
+            let result = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("NMX-C domain discovery stop was requested");
+                    return;
+                }
+                result = self.run_domain_discovery_single_iteration() => result,
+            };
+            if let Err(error) = result {
                 tracing::warn!(%error, "NMX-C domain discovery iteration failed");
             }
 
@@ -1265,29 +1271,49 @@ impl NvlPartitionMonitor {
     /// Unlike the partition monitor, this path performs only NMX-C Hello calls
     /// and component metadata updates. It never reconciles partition state.
     async fn run_domain_discovery_single_iteration(&self) -> NvLinkManagerResult<()> {
-        let _lock = match self
-            .work_lock_manager_handle
-            .try_acquire_lock(Self::DOMAIN_DISCOVERY_WORK_KEY.into())
-            .await
+        let operation_timeout = self.config.domain_discovery_operation_timeout;
+        let work_lock = match tokio::time::timeout(
+            operation_timeout,
+            self.work_lock_manager_handle
+                .try_acquire_lock(Self::ITERATION_WORK_KEY.into()),
+        )
+        .await
         {
-            Ok(lock) => lock,
-            Err(error) => {
+            Ok(Ok(lock)) => lock,
+            Ok(Err(error)) => {
                 tracing::warn!(
                     %error,
                     "NMX-C domain discovery failed to acquire work lock: another NICo instance may be running"
                 );
                 return Ok(());
             }
+            Err(_) => {
+                tracing::warn!(
+                    timeout = ?operation_timeout,
+                    "NMX-C domain discovery work-lock acquisition timed out"
+                );
+                return Ok(());
+            }
         };
 
-        let mut txn = self.db_pool.txn_begin().await?;
-        let rack_endpoint_rows =
-            db::switch::find_ready_control_plane_configured_switch_endpoints(&mut txn).await?;
-        txn.commit().await?;
+        let rack_endpoint_rows = tokio::time::timeout(operation_timeout, async {
+            let mut txn = self.db_pool.txn_begin().await?;
+            let rows =
+                db::switch::find_ready_control_plane_configured_switch_endpoints(&mut txn).await?;
+            txn.commit().await?;
+            Ok::<_, NvLinkManagerError>(rows)
+        })
+        .await
+        .map_err(|_| {
+            NvLinkManagerError::internal(format!(
+                "NMX-C domain discovery endpoint lookup timed out after {operation_timeout:?}"
+            ))
+        })??;
 
         let concurrency = Semaphore::new(self.config.partition_monitor_max_concurrent_groups.get());
         future::join_all(rack_endpoint_rows.into_iter().map(|row| {
             let concurrency = &concurrency;
+            let work_lock = &work_lock;
             async move {
                 let _permit = concurrency
                     .acquire()
@@ -1298,8 +1324,24 @@ impl NvlPartitionMonitor {
                     None,
                     &self.config,
                 );
-                self.observe_and_record_rack_switch_domain_uuid(&row.rack_id, &endpoint_url)
-                    .await;
+                if tokio::time::timeout(
+                    operation_timeout,
+                    self.observe_and_record_rack_switch_domain_uuid(
+                        &row.rack_id,
+                        &endpoint_url,
+                        work_lock,
+                    ),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!(
+                        rack_id = %row.rack_id,
+                        endpoint = %endpoint_url,
+                        timeout = ?operation_timeout,
+                        "NMX-C domain discovery rack observation timed out"
+                    );
+                }
             }
         }))
         .await;
@@ -1350,7 +1392,7 @@ impl NvlPartitionMonitor {
         &self,
         metrics: &mut NvlPartitionMonitorMetrics,
     ) -> NvLinkManagerResult<usize> {
-        let _lock = match self
+        let work_lock = match self
             .work_lock_manager_handle
             .try_acquire_lock(Self::ITERATION_WORK_KEY.into())
             .await
@@ -1500,12 +1542,14 @@ impl NvlPartitionMonitor {
             // Borrow outside `async move` so the closure copies the &Semaphore reference
             // (which is Copy) rather than trying to move the Semaphore itself.
             let concurrency = &concurrency;
+            let work_lock = &work_lock;
             async move {
                 let _permit = concurrency
                     .acquire()
                     .await
                     .expect("NMX-C group concurrency semaphore is never closed");
-                self.process_nmx_c_partition_monitor_group(input).await
+                self.process_nmx_c_partition_monitor_group(input, work_lock)
+                    .await
             }
         }))
         .await;
@@ -1523,7 +1567,7 @@ impl NvlPartitionMonitor {
         // metadata, so each endpoint is contacted at most once per iteration.
         for (rack_id, endpoint_url) in &rack_id_to_resolved_endpoint {
             if !managed_host_snapshots_by_rack_id.contains_key(rack_id) {
-                self.observe_and_record_rack_switch_domain_uuid(rack_id, endpoint_url)
+                self.observe_and_record_rack_switch_domain_uuid(rack_id, endpoint_url, &work_lock)
                     .await;
             }
         }
@@ -1544,6 +1588,7 @@ impl NvlPartitionMonitor {
     async fn process_nmx_c_partition_monitor_group(
         &self,
         input: ProcessMachineGroupInput<'_>,
+        work_lock: &WorkLock,
     ) -> GroupResult {
         let ProcessMachineGroupInput {
             group_id,
@@ -1643,7 +1688,7 @@ impl NvlPartitionMonitor {
         // Current ingestion treats one rack as one NMX-C domain. Publish the
         // rack's Hello observation to the switches using that same boundary.
         if let Some(rack_id) = rack_id {
-            self.record_rack_switch_domain_uuid(rack_id, domain_uuid)
+            self.record_rack_switch_domain_uuid(rack_id, domain_uuid, work_lock)
                 .await;
         }
 
@@ -1768,6 +1813,7 @@ impl NvlPartitionMonitor {
         &self,
         rack_id: &RackId,
         endpoint_url: &str,
+        work_lock: &WorkLock,
     ) {
         let endpoint = match Endpoint::new(endpoint_url) {
             Ok(endpoint) => endpoint,
@@ -1825,7 +1871,7 @@ impl NvlPartitionMonitor {
             }
         };
 
-        self.record_rack_switch_domain_uuid(rack_id, domain_uuid)
+        self.record_rack_switch_domain_uuid(rack_id, domain_uuid, work_lock)
             .await;
     }
 
@@ -1834,13 +1880,19 @@ impl NvlPartitionMonitor {
     ///
     /// Nil observations and database failures leave the last valid value
     /// unchanged. Publication must not block partition reconciliation.
-    async fn record_rack_switch_domain_uuid(&self, rack_id: &RackId, domain_uuid: NvLinkDomainId) {
+    async fn record_rack_switch_domain_uuid(
+        &self,
+        rack_id: &RackId,
+        domain_uuid: NvLinkDomainId,
+        work_lock: &WorkLock,
+    ) {
         if domain_uuid == NvLinkDomainId::nil() {
             return;
         }
 
         let update_result: NvLinkManagerResult<_> = async {
             let mut txn = self.db_pool.txn_begin().await?;
+            work_lock.fence_transaction(&mut txn).await?;
 
             let changed_switches =
                 db::switch::update_nvlink_domain_uuid_for_rack(&mut txn, rack_id, domain_uuid)
@@ -3529,6 +3581,7 @@ mod monitor_mode_tests {
 mod machine_group_tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use carbide_macros::sqlx_test;
     use carbide_test_support::{Check, check_values};
@@ -3888,6 +3941,9 @@ mod machine_group_tests {
         let mut join_set = JoinSet::new();
         let work_lock_manager =
             db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let work_lock = work_lock_manager
+            .try_acquire_lock(NvlPartitionMonitor::ITERATION_WORK_KEY.into())
+            .await?;
 
         let test_meter = TestMeter::default();
 
@@ -3955,17 +4011,20 @@ mod machine_group_tests {
                 null_observations: pending,
                 partial_metrics: metrics,
             } = monitor
-                .process_nmx_c_partition_monitor_group(ProcessMachineGroupInput {
-                    group_id: "rack-1".to_string(),
-                    group_type: nmx_c_endpoint::ManagedHostGroupType::Rack,
-                    snapshots: &rack_snapshots,
-                    endpoint_url,
-                    rack_id: Some(&rack_id),
-                    all_managed_host_snapshots: &all_snapshots,
-                    machine_nvlink_info,
-                    db_nvl_partitions: &[],
-                    db_nvl_logical_partitions: &[],
-                })
+                .process_nmx_c_partition_monitor_group(
+                    ProcessMachineGroupInput {
+                        group_id: "rack-1".to_string(),
+                        group_type: nmx_c_endpoint::ManagedHostGroupType::Rack,
+                        snapshots: &rack_snapshots,
+                        endpoint_url,
+                        rack_id: Some(&rack_id),
+                        all_managed_host_snapshots: &all_snapshots,
+                        machine_nvlink_info,
+                        db_nvl_partitions: &[],
+                        db_nvl_logical_partitions: &[],
+                    },
+                    &work_lock,
+                )
                 .await;
 
             assert_eq!(completed_operations, 0, "{scenario}");
@@ -3996,7 +4055,7 @@ mod machine_group_tests {
         // observation. It must not erase the value published by the successful
         // rack-group case above.
         monitor
-            .record_rack_switch_domain_uuid(&rack_id, NvLinkDomainId::nil())
+            .record_rack_switch_domain_uuid(&rack_id, NvLinkDomainId::nil(), &work_lock)
             .await;
 
         let matching_counts: (i64, i64) = sqlx::query_as(
@@ -4021,7 +4080,11 @@ mod machine_group_tests {
             .await?;
 
         monitor
-            .observe_and_record_rack_switch_domain_uuid(&rack_id, "http://nmxc.example:9370")
+            .observe_and_record_rack_switch_domain_uuid(
+                &rack_id,
+                "http://nmxc.example:9370",
+                &work_lock,
+            )
             .await;
 
         let matching_counts: (i64, i64) = sqlx::query_as(
@@ -4036,6 +4099,7 @@ mod machine_group_tests {
 
         assert_eq!(matching_counts, (2, 1));
 
+        drop(work_lock);
         drop(monitor);
         join_set.shutdown().await;
 
@@ -4191,6 +4255,11 @@ mod machine_group_tests {
                 vec![NmxcSimOperation::Hello],
             ),
             (
+                "Hello timeout",
+                NmxcSimClient::with_hanging_hello(),
+                vec![NmxcSimOperation::Hello],
+            ),
+            (
                 "missing Hello header",
                 NmxcSimClient::with_missing_hello_header(),
                 vec![NmxcSimOperation::Hello],
@@ -4219,6 +4288,7 @@ mod machine_group_tests {
                 TestMeter::default().meter(),
                 NvLinkConfig {
                     domain_discovery_enabled: true,
+                    domain_discovery_operation_timeout: Duration::from_millis(20),
                     ..NvLinkConfig::default()
                 },
                 HostHealthConfig::default(),
@@ -4236,6 +4306,55 @@ mod machine_group_tests {
         }
 
         drop(work_lock_manager);
+        join_set.shutdown().await;
+
+        Ok(())
+    }
+
+    #[sqlx_test]
+    async fn read_only_domain_discovery_cancels_an_in_flight_iteration(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let rack_id = RackId::new("rack-cancelled-discovery");
+        seed_domain_discovery_rack(&pool, &rack_id, 91, true, None).await?;
+
+        let mut join_set = JoinSet::new();
+        let work_lock_manager =
+            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let nmxc_client = Arc::new(NmxcSimClient::with_hanging_hello());
+        let monitor = Arc::new(NvlPartitionMonitor::new(
+            pool,
+            nmxc_client.clone(),
+            TestMeter::default().meter(),
+            NvLinkConfig {
+                domain_discovery_enabled: true,
+                domain_discovery_operation_timeout: Duration::from_secs(60),
+                ..NvLinkConfig::default()
+            },
+            HostHealthConfig::default(),
+            work_lock_manager,
+        ));
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let discovery_task = tokio::spawn({
+            let monitor = monitor.clone();
+            let cancel_token = cancel_token.clone();
+            async move { monitor.run_domain_discovery(cancel_token).await }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if nmxc_client.operations() == vec![NmxcSimOperation::Hello] {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+
+        cancel_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), discovery_task).await??;
+
+        drop(monitor);
         join_set.shutdown().await;
 
         Ok(())

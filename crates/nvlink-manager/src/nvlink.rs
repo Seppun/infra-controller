@@ -77,6 +77,7 @@ pub mod test_support {
         Success(String),
         MissingHeader,
         Failure,
+        Hang,
     }
 
     /// In-memory NMX-C gRPC API mock, mirroring [`NmxmSimClient`] partition presets for tests.
@@ -236,6 +237,14 @@ pub mod test_support {
             }
         }
 
+        /// Returns a simulator whose `Hello` operation remains pending until cancelled.
+        pub fn with_hanging_hello() -> Self {
+            Self {
+                _hello_behavior: Arc::new(Mutex::new(NmxcSimHelloBehavior::Hang)),
+                ..Self::default()
+            }
+        }
+
         /// Returns a simulator pool that cannot create an NMX-C client.
         pub fn with_client_creation_failure() -> Self {
             Self {
@@ -326,6 +335,7 @@ pub mod test_support {
                 NmxcSimHelloBehavior::Failure => {
                     return Err(NmxcError::invalid_response("simulated Hello failure"));
                 }
+                NmxcSimHelloBehavior::Hang => return std::future::pending().await,
             };
 
             Ok(nmxc_model::ServerHello {

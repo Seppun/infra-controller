@@ -33,6 +33,14 @@ pub struct NvLinkConfig {
     #[serde(default)]
     pub domain_discovery_enabled: bool,
 
+    /// Maximum duration for one read-only domain-discovery database or NMX-C operation.
+    #[serde(
+        default = "NvLinkConfig::default_domain_discovery_operation_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub domain_discovery_operation_timeout: std::time::Duration,
+
     /// Defaults to 1 Minute if not specified.
     #[serde(
         default = "NvLinkConfig::default_monitor_run_interval",
@@ -74,6 +82,10 @@ pub struct NvLinkConfig {
 impl NvLinkConfig {
     pub const fn default_monitor_run_interval() -> std::time::Duration {
         std::time::Duration::from_secs(60)
+    }
+
+    pub const fn default_domain_discovery_operation_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(30)
     }
 
     pub const fn default_partition_monitor_max_concurrent_groups() -> std::num::NonZeroUsize {
@@ -143,6 +155,7 @@ impl Default for NvLinkConfig {
         Self {
             enabled: false,
             domain_discovery_enabled: false,
+            domain_discovery_operation_timeout: Self::default_domain_discovery_operation_timeout(),
             monitor_run_interval: Self::default_monitor_run_interval(),
             nmx_c_tls_ca_cert_path: None,
             nmx_c_tls_client_cert_path: None,
@@ -166,6 +179,7 @@ mod test {
         let value_json = r#"{
             "enabled": true,
             "domain_discovery_enabled": true,
+            "domain_discovery_operation_timeout": "17s",
             "allow_insecure": true,
             "monitor_run_interval": "33"
         }"#;
@@ -176,6 +190,7 @@ mod test {
             NvLinkConfig {
                 enabled: true,
                 domain_discovery_enabled: true,
+                domain_discovery_operation_timeout: std::time::Duration::from_secs(17),
                 monitor_run_interval: std::time::Duration::from_secs(33),
                 nmx_c_tls_ca_cert_path: None,
                 nmx_c_tls_client_cert_path: None,
@@ -196,6 +211,10 @@ mod test {
 
         assert!(!config.enabled);
         assert!(!config.domain_discovery_enabled);
+        assert_eq!(
+            config.domain_discovery_operation_timeout,
+            NvLinkConfig::default_domain_discovery_operation_timeout()
+        );
         assert!(!config.allow_insecure);
     }
 
@@ -205,6 +224,7 @@ mod test {
             r#"{
                 "enabled": false,
                 "domain_discovery_enabled": true,
+                "domain_discovery_operation_timeout": "12s",
                 "allow_insecure": false,
                 "nmx_c_tls_ca_cert_path": "/tls/ca.crt",
                 "nmx_c_tls_client_cert_path": "/tls/client.crt",
@@ -217,6 +237,10 @@ mod test {
 
         assert!(!config.enabled);
         assert!(config.domain_discovery_enabled);
+        assert_eq!(
+            config.domain_discovery_operation_timeout,
+            std::time::Duration::from_secs(12)
+        );
         assert!(!config.allow_insecure);
         assert_eq!(
             config.nmx_c_tls_ca_cert_path.as_deref(),

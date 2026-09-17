@@ -501,6 +501,7 @@ shipped configuration selects a plaintext mode.
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `false` | Enables NvLink partitioning. |
 | `domain_discovery_enabled` | `bool` | `false` | When partitioning is disabled, enables read-only NMX-C `Hello` polling that records the observed domain on rack components. Partitioning already performs this discovery when enabled. |
+| `domain_discovery_operation_timeout` | `Duration` | `30s` | Maximum duration for each discovery database operation and each per-rack NMX-C observation, including metadata persistence. |
 | `monitor_run_interval` | `Duration` | `60s` | NvLink partition or read-only domain-discovery polling interval. |
 | `nmx_c_tls_ca_cert_path` | `Option<String>` | — | Extra CA bundle for verifying the NMX-C server over HTTPS. |
 | `nmx_c_tls_client_cert_path` | `Option<String>` | — | Client certificate for mTLS to NMX-C. |
