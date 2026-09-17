@@ -50,11 +50,12 @@ hwMacAddressRanges:
 mat-k8s-controller:
   enabled: false
 # The chart ships a startupProbe with failureThreshold 120 (60 minutes). This
-# pod registers ~4,500 records (one per host; DPUs are not registered) before
-# it binds the redfish port, about 2.5h at the ~2s per record from the chart
-# values.yaml sizing rule, and the startupProbe gates the generous liveness
-# window below -- so the chart default would re-impose a 60-minute bring-up
-# limit. 1200 x 30s = 10h keeps headroom.
+# file defines hosts only (no racks, switches or power shelves) and DPUs are
+# not registered, so the pod registers 4,500 records before it binds the
+# redfish port: about 2.5h at the ~2s per record from the chart values.yaml
+# sizing rule. The startupProbe gates the generous liveness window below, so
+# the chart default would re-impose a 60-minute bring-up limit. 1200 x 30s =
+# 10h keeps headroom.
 startupProbe:
   tcpSocket:
     port: redfish

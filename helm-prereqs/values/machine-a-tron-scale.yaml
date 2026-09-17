@@ -75,9 +75,10 @@ mat-k8s-controller:
 # port is bound the normal liveness/readiness probes kick in with tight
 # thresholds so real runtime hangs are still caught quickly.
 #
-# Sizing rule: see the startupProbe comment in the chart values.yaml. A
-# 4,500-host pod registers ~4,500 records x 2s = 2.5h; 1200 x 30s = 10h keeps
-# headroom.
+# Sizing rule: see the startupProbe comment in the chart values.yaml. Pods in
+# this file define hosts only (no racks, switches or power shelves) and DPUs
+# are not registered, so records = hosts per pod. Sized for HOST_COUNT=4500 in
+# one pod: 4,500 records x 2s = 2.5h; 1200 x 30s = 10h keeps headroom.
 startupProbe:
   tcpSocket:
     port: redfish
