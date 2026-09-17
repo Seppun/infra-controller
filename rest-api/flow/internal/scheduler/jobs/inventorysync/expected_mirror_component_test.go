@@ -295,12 +295,14 @@ func TestDiffComponentFields(t *testing.T) {
 	rackB := uuid.New()
 	base := func() *model.Component {
 		return &model.Component{
-			Name:      "n",
-			Model:     "m",
-			SlotID:    1,
-			TrayIndex: 2,
-			HostID:    3,
-			RackID:    rackA,
+			Name:         "n",
+			Manufacturer: "maker",
+			SerialNumber: "serial",
+			Model:        "m",
+			SlotID:       1,
+			TrayIndex:    2,
+			HostID:       3,
+			RackID:       rackA,
 		}
 	}
 
@@ -354,12 +356,14 @@ func TestDiffComponentFields(t *testing.T) {
 	}
 
 	for name, mutate := range map[string]func(*model.Component){
-		"name":       func(c *model.Component) { c.Name = "n2" },
-		"model":      func(c *model.Component) { c.Model = "m2" },
-		"slot_id":    func(c *model.Component) { c.SlotID = 9 },
-		"tray_index": func(c *model.Component) { c.TrayIndex = 9 },
-		"host_id":    func(c *model.Component) { c.HostID = 9 },
-		"rack_id":    func(c *model.Component) { c.RackID = rackB },
+		"name":          func(c *model.Component) { c.Name = "n2" },
+		"manufacturer":  func(c *model.Component) { c.Manufacturer = "new-maker" },
+		"serial_number": func(c *model.Component) { c.SerialNumber = "new-serial" },
+		"model":         func(c *model.Component) { c.Model = "m2" },
+		"slot_id":       func(c *model.Component) { c.SlotID = 9 },
+		"tray_index":    func(c *model.Component) { c.TrayIndex = 9 },
+		"host_id":       func(c *model.Component) { c.HostID = 9 },
+		"rack_id":       func(c *model.Component) { c.RackID = rackB },
 	} {
 		t.Run("change in "+name+" is detected", func(t *testing.T) {
 			desired := base()
@@ -383,7 +387,7 @@ func TestDiffComponentFields(t *testing.T) {
 	})
 }
 
-func TestApplyComponentChanges_DoesNotTouchIdentityOrRuntimeFields(t *testing.T) {
+func TestApplyComponentChanges_ConvergesCoreFieldsWithoutTouchingIdentityOrRuntimeFields(t *testing.T) {
 	id := uuid.New()
 	rackA := uuid.New()
 	rackB := uuid.New()
@@ -403,9 +407,11 @@ func TestApplyComponentChanges_DoesNotTouchIdentityOrRuntimeFields(t *testing.T)
 		},
 	}
 	desired := &model.Component{
-		Name:   "new",
-		Model:  "new-model",
-		RackID: rackB,
+		Name:         "new",
+		Manufacturer: "Wistron",
+		SerialNumber: "SN-2",
+		Model:        "new-model",
+		RackID:       rackB,
 	}
 
 	applyComponentChanges(existing, desired, expectedComponentSpec{Description: "Core description"})
@@ -414,8 +420,8 @@ func TestApplyComponentChanges_DoesNotTouchIdentityOrRuntimeFields(t *testing.T)
 	assert.Equal(t, "new-model", existing.Model)
 	assert.Equal(t, rackB, existing.RackID)
 	assert.Equal(t, "Compute", existing.Type, "Type is identity; mirror must not touch")
-	assert.Equal(t, "Foxconn", existing.Manufacturer, "Manufacturer is identity")
-	assert.Equal(t, "SN-1", existing.SerialNumber, "SerialNumber is identity")
+	assert.Equal(t, "Wistron", existing.Manufacturer, "manufacturer is Core-owned metadata")
+	assert.Equal(t, "SN-2", existing.SerialNumber, "serial_number is Core-owned metadata")
 	require.NotNil(t, existing.ComponentID)
 	assert.Equal(t, "runtime-id", *existing.ComponentID, "external_id is runtime-owned")
 	assert.Equal(t, "10.0.0.2", existing.Description["nvos_ip"], "runtime-owned description entry must survive")

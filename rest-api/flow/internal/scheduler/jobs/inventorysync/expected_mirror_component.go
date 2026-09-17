@@ -732,20 +732,16 @@ func componentDescriptionWithExpected(existing map[string]any, expected string) 
 // columns whose Core labels were malformed and so should keep Flow's existing
 // value rather than be overwritten with the parseLabelInt fallback zero.
 //
-// Manufacturer and serial number are only filled in when Flow's copy is empty:
-// Core dropping a label it used to send is a data gap, not an instruction to
-// erase what Flow already recorded.
+// Manufacturer and serial number are descriptive metadata owned by Core. The
+// host BMC MAC identifies the mirrored component, so corrected or cleared
+// chassis labels overwrite Flow's current values without changing its UUID.
 func applyComponentChanges(existing, desired *model.Component, spec expectedComponentSpec) {
 	existing.Name = desired.Name
 	existing.Model = desired.Model
 	existing.Description = componentDescriptionWithExpected(existing.Description, spec.Description)
 	existing.RackID = desired.RackID
-	if existing.Manufacturer == "" {
-		existing.Manufacturer = desired.Manufacturer
-	}
-	if existing.SerialNumber == "" {
-		existing.SerialNumber = desired.SerialNumber
-	}
+	existing.Manufacturer = desired.Manufacturer
+	existing.SerialNumber = desired.SerialNumber
 	if !spec.preserveFields["slot_id"] {
 		existing.SlotID = desired.SlotID
 	}
@@ -773,10 +769,10 @@ func diffComponentFields(existing, desired *model.Component, spec expectedCompon
 	if existing.Model != desired.Model {
 		diffs = append(diffs, fieldChange{"model", existing.Model, desired.Model})
 	}
-	if existing.Manufacturer == "" && desired.Manufacturer != "" {
+	if existing.Manufacturer != desired.Manufacturer {
 		diffs = append(diffs, fieldChange{"manufacturer", existing.Manufacturer, desired.Manufacturer})
 	}
-	if existing.SerialNumber == "" && desired.SerialNumber != "" {
+	if existing.SerialNumber != desired.SerialNumber {
 		diffs = append(diffs, fieldChange{"serial_number", existing.SerialNumber, desired.SerialNumber})
 	}
 	existingDescription, hasExpectedDescription := existing.Description[expectedDescriptionKey]
