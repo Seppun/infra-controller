@@ -486,7 +486,7 @@ async fn create_ready_rack_with_switches(
 
     let mut txn = pool.begin().await?;
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
-    db_rack::try_update_controller_state(
+    let updated = db_rack::try_update_controller_state(
         txn.as_mut(),
         &rack_id,
         rack.controller_state.version,
@@ -494,6 +494,7 @@ async fn create_ready_rack_with_switches(
         &RackState::Ready,
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     txn.commit().await?;
 
     Ok((rack_id, switch_ids))
@@ -762,7 +763,7 @@ async fn test_terminate_rack_maintenance_latches_request_and_cleans_access_token
 
     let mut txn = pool.begin().await?;
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
-    assert!(
+    assert_eq!(
         db_rack::try_update_controller_state(
             txn.as_mut(),
             &rack_id,
@@ -774,7 +775,8 @@ async fn test_terminate_rack_maintenance_latches_request_and_cleans_access_token
                 },
             },
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
     txn.commit().await?;
 
@@ -4591,10 +4593,7 @@ async fn assert_configure_nmx_cluster_v2_results(
 
     assert_eq!(
         certificate_request.services,
-        vec![
-            rms::SwitchService::NvueApi as i32,
-            rms::SwitchService::ScaleUpFabricManager as i32,
-        ]
+        vec![rms::SwitchService::NvueApi as i32]
     );
 
     assert_node_set_contains_switches(certificate_request.nodes.as_ref(), switch_ids);
@@ -5232,13 +5231,7 @@ async fn test_configure_nmx_cluster_certificate_submission_does_not_require_bmc_
 
     assert_node_set_contains_switches(request.nodes.as_ref(), &switch_ids);
 
-    assert_eq!(
-        request.services,
-        vec![
-            rms::SwitchService::NvueApi as i32,
-            rms::SwitchService::ScaleUpFabricManager as i32,
-        ]
-    );
+    assert_eq!(request.services, vec![rms::SwitchService::NvueApi as i32]);
 
     assert!(
         request
@@ -5765,7 +5758,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
         )
         .await;
         let rack = get_db_rack(txn.as_mut(), &rack_id).await;
-        db_rack::try_update_controller_state(
+        let updated = db_rack::try_update_controller_state(
             txn.as_mut(),
             &rack_id,
             rack.controller_state.version,
@@ -5773,6 +5766,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
             &RackState::Ready,
         )
         .await?;
+        assert_eq!(updated, db::ConditionalWrite::Applied(()));
         txn.commit().await?;
     }
 
