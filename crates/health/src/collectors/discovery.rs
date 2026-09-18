@@ -396,6 +396,20 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 sensor_ids.insert(sensor.odata_id().to_string());
             }
             let entity_id = entity.raw().odata_id.to_string();
+            let (oem_power_output, oem_fan_speed_target_percent) = match entity.oem_delta() {
+                Ok(Some(delta)) => (delta.power(), delta.fan_speed_target()),
+                Ok(None) => (None, None),
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        power_supply = %entity.raw().odata_id,
+                        bmc_address = ?self.endpoint.addr,
+                        rack_id = self.endpoint.rack_id.as_ref().map(tracing::field::display),
+                        "Failed to parse Delta OEM power supply data"
+                    );
+                    (None, None)
+                }
+            };
             let oem_capacity_watts = if entity.raw().power_capacity_watts.flatten().is_some() {
                 None
             } else {
@@ -429,6 +443,8 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 chassis: chassis.clone(),
                 sensors,
                 oem_capacity_watts,
+                oem_power_output,
+                oem_fan_speed_target_percent,
             });
         }
     }
@@ -880,6 +896,83 @@ mod bmc_mock_integration_tests {
         assert!(
             oem_fallbacks.iter().all(Option::is_none),
             "standard PowerCapacityWatts must win; OEM fallback must stay unused: {oem_fallbacks:?}"
+        );
+        assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
+    }
+
+    /// Delta reports commanded PSU power state and fan speed target only
+    /// under the OEM extension; this proves discovery collects both and
+    /// that a shelf with a mixed on/off PSU set reports each supply's own
+    /// value rather than one shelf-wide value.
+    #[tokio::test]
+    async fn delta_supplies_resolve_oem_power_and_fan_speed() {
+        let h = bmc_mock::test_support::delta_powershelf_bmc_with_psu_power(vec![
+            true, true, false, true, true, true,
+        ])
+        .await;
+        let chassis = h
+            .service_root
+            .chassis()
+            .await
+            .expect("chassis collection")
+            .expect("chassis collection is present")
+            .members()
+            .await
+            .expect("chassis members")
+            .into_iter()
+            .next()
+            .expect("fixture has one chassis");
+        let collector = EntityDiscoveryCollector::<TestBmc> {
+            endpoint: Arc::new(test_endpoint(mac("00:11:22:33:44:77"))),
+            bmc: h.bmc.clone(),
+            shared: Arc::new(ArcSwapOption::empty()),
+            request_concurrency: 2,
+            collect_shelf_power: true,
+            gpu_identity: false,
+            generation: 0,
+        };
+        let fetch_failures = AtomicUsize::new(0);
+        let mut entities = Vec::new();
+        let mut sensor_ids = HashSet::new();
+        collector
+            .discover_power_supplies(
+                &Arc::new(chassis),
+                &fetch_failures,
+                &mut entities,
+                &mut sensor_ids,
+            )
+            .await;
+
+        let mut power_by_id: BTreeMap<String, Option<bool>> = BTreeMap::new();
+        let mut fan_speed_by_id: BTreeMap<String, Option<i64>> = BTreeMap::new();
+        for entity in &entities {
+            if let DiscoveredEntity::PowerSupply {
+                entity,
+                oem_power_output,
+                oem_fan_speed_target_percent,
+                ..
+            } = entity
+            {
+                power_by_id.insert(entity.raw().id.to_string(), *oem_power_output);
+                fan_speed_by_id.insert(entity.raw().id.to_string(), *oem_fan_speed_target_percent);
+            }
+        }
+
+        let expected_power: BTreeMap<String, Option<bool>> = [
+            ("PowerSupplyUnit 1", true),
+            ("PowerSupplyUnit 2", true),
+            ("PowerSupplyUnit 3", false),
+            ("PowerSupplyUnit 4", true),
+            ("PowerSupplyUnit 5", true),
+            ("PowerSupplyUnit 6", true),
+        ]
+        .into_iter()
+        .map(|(id, v)| (id.to_string(), Some(v)))
+        .collect();
+        assert_eq!(power_by_id, expected_power);
+        assert!(
+            fan_speed_by_id.values().all(|v| *v == Some(0)),
+            "fixture sets FanSpeedTarget 0 for every PSU: {fan_speed_by_id:?}"
         );
         assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
     }
