@@ -223,33 +223,69 @@ func TestConfig_ServerTLSConfig(t *testing.T) {
 }
 
 func TestConfig_DynamicTLSConfig(t *testing.T) {
-	caFile, certFile, keyFile := generateTestCerts(t)
-	tlsConfig, dynamicConfig, err := Config{
-		CACert:  caFile,
-		TLSCert: certFile,
-		TLSKey:  keyFile,
-	}.DynamicTLSConfig("temporal.example.com")
-	require.NoError(t, err)
-	defer dynamicConfig.Close()
+	for _, partial := range []bool{false, true} {
+		name := "valid certificates"
+		if partial {
+			name = "partial configuration"
+		}
+		t.Run(name, func(t *testing.T) {
+			caFile, certFile, keyFile := generateTestCerts(t)
+			config := Config{
+				CACert:  caFile,
+				TLSCert: certFile,
+				TLSKey:  keyFile,
+			}
+			if partial {
+				config.TLSKey = ""
+			}
+			tlsConfig, dynamicConfig, err := config.DynamicTLSConfig("temporal.example.com")
+			if partial {
+				require.EqualError(t, err, config.Validate().Error())
+				assert.Nil(t, tlsConfig)
+				assert.Nil(t, dynamicConfig)
+				return
+			}
+			require.NoError(t, err)
+			defer dynamicConfig.Close()
 
-	assert.NotNil(t, tlsConfig.RootCAs)
-	assert.NotNil(t, tlsConfig.GetClientCertificate)
-	assert.Equal(t, "temporal.example.com", tlsConfig.ServerName)
+			assert.NotNil(t, tlsConfig.RootCAs)
+			assert.NotNil(t, tlsConfig.GetClientCertificate)
+			assert.Equal(t, "temporal.example.com", tlsConfig.ServerName)
+		})
+	}
 }
 
 func TestConfig_DynamicServerTLSConfig(t *testing.T) {
-	caFile, certFile, keyFile := generateTestCerts(t)
-	tlsConfig, dynamicConfig, err := Config{
-		CACert:  caFile,
-		TLSCert: certFile,
-		TLSKey:  keyFile,
-	}.DynamicServerTLSConfig()
-	require.NoError(t, err)
-	defer dynamicConfig.Close()
+	for _, partial := range []bool{false, true} {
+		name := "valid certificates"
+		if partial {
+			name = "partial configuration"
+		}
+		t.Run(name, func(t *testing.T) {
+			caFile, certFile, keyFile := generateTestCerts(t)
+			config := Config{
+				CACert:  caFile,
+				TLSCert: certFile,
+				TLSKey:  keyFile,
+			}
+			if partial {
+				config.TLSKey = ""
+			}
+			tlsConfig, dynamicConfig, err := config.DynamicServerTLSConfig()
+			if partial {
+				require.EqualError(t, err, config.Validate().Error())
+				assert.Nil(t, tlsConfig)
+				assert.Nil(t, dynamicConfig)
+				return
+			}
+			require.NoError(t, err)
+			defer dynamicConfig.Close()
 
-	currentConfig, err := tlsConfig.GetConfigForClient(nil)
-	require.NoError(t, err)
-	assert.NotEmpty(t, currentConfig.Certificates)
-	assert.NotNil(t, currentConfig.ClientCAs)
-	assert.Equal(t, tls.RequireAndVerifyClientCert, currentConfig.ClientAuth)
+			currentConfig, err := tlsConfig.GetConfigForClient(nil)
+			require.NoError(t, err)
+			assert.NotEmpty(t, currentConfig.Certificates)
+			assert.NotNil(t, currentConfig.ClientCAs)
+			assert.Equal(t, tls.RequireAndVerifyClientCert, currentConfig.ClientAuth)
+		})
+	}
 }

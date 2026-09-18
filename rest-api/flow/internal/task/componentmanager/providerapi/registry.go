@@ -4,9 +4,25 @@
 package providerapi
 
 import (
+	"errors"
+	"io"
 	"strings"
 	"sync"
 )
+
+// Close releases providers that own resources. Call after all consumers stop.
+func (pr *ProviderRegistry) Close() error {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	var err error
+	for name, provider := range pr.providers {
+		if closer, ok := provider.(io.Closer); ok {
+			err = errors.Join(err, closer.Close())
+		}
+		delete(pr.providers, name)
+	}
+	return err
+}
 
 // ProviderRegistry manages API providers for component manager implementations.
 // It allows implementations to request their required providers by name.

@@ -118,6 +118,10 @@ func (c Config) ServerTLSConfig() (*tls.Config, error) {
 // are refreshed from disk. The caller owns the returned dynamic config and
 // must close it when the client is no longer used.
 func (c Config) DynamicTLSConfig(serverName string) (*tls.Config, *dynamictls.DynTLSCfg, error) {
+	err := c.Validate()
+	if err != nil {
+		return nil, nil, err
+	}
 	dynamicConfig, err := dynamictls.NewDynTLSCfg(c.TLSKey, c.TLSCert, c.CACert)
 	if err != nil {
 		return nil, nil, err
@@ -135,6 +139,10 @@ func (c Config) DynamicTLSConfig(serverName string) (*tls.Config, *dynamictls.Dy
 // key, and client CA pool are refreshed from disk. The caller owns the returned
 // dynamic config and must close it when the server stops.
 func (c Config) DynamicServerTLSConfig() (*tls.Config, *dynamictls.DynTLSCfg, error) {
+	err := c.Validate()
+	if err != nil {
+		return nil, nil, err
+	}
 	dynamicConfig, err := dynamictls.NewDynTLSCfg(c.TLSKey, c.TLSCert, c.CACert)
 	if err != nil {
 		return nil, nil, err

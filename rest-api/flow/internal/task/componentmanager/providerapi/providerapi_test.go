@@ -17,6 +17,47 @@ type testProvider struct {
 	name string
 }
 
+type closeableTestProvider struct {
+	testProvider
+	closed bool
+	err    error
+}
+
+func (p *closeableTestProvider) Close() error {
+	p.closed = true
+	return p.err
+}
+
+func TestProviderRegistry_Close(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		name := "successful cleanup"
+		if fail {
+			name = "cleanup continues after error"
+		}
+		t.Run(name, func(t *testing.T) {
+			registry := NewProviderRegistry()
+			first := &closeableTestProvider{testProvider: testProvider{name: "first"}}
+			second := &closeableTestProvider{testProvider: testProvider{name: "second"}}
+			if fail {
+				first.err = errors.New("close failed")
+			}
+			require.NoError(t, registry.Register(first))
+			require.NoError(t, registry.Register(second))
+			require.NoError(t, registry.Register(testProvider{name: "no resources"}))
+			err := registry.Close()
+			if fail {
+				require.ErrorIs(t, err, first.err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.True(t, first.closed)
+			assert.True(t, second.closed)
+			assert.Empty(t, registry.List())
+			require.NoError(t, registry.Close())
+		})
+	}
+}
+
 func (p testProvider) Name() string {
 	return p.name
 }

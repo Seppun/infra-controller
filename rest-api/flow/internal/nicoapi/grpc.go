@@ -69,6 +69,14 @@ const (
 type grpcClient struct {
 	gclient     *batchingForgeClient
 	grpcTimeout time.Duration
+	conn        *grpc.ClientConn
+	closeTLS    func()
+}
+
+// Close releases the Core connection and its certificate watcher.
+func (c *grpcClient) Close() error {
+	defer c.closeTLS()
+	return c.conn.Close()
 }
 
 // batchingForgeClient keeps limit handling below the Flow client methods so
@@ -217,6 +225,8 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 	}
 
 	return &grpcClient{
+		conn:        conn,
+		closeTLS:    dynamicConfig.Close,
 		gclient:     newBatchingForgeClient(corev1.NewForgeClient(conn)),
 		grpcTimeout: grpcTimeout,
 	}, nil
