@@ -91,10 +91,10 @@ export NICO_REST_IMAGE_TAG=<nico-rest-image-tag>         # e.g. v2.0.0
 # --skip-dpf to setup.sh (sites with no DPUs / still on iPXE):
 export NICO_DPF_DPU_INTERFACE=<control-plane-nic>     # NIC facing the DPUs
 export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plane VIP
-# Before setup, optionally use the local environment-then-file chain (typically
-# a watched Secret) and set bmcSiteWideRootSource: local in the Core values.
+# Optional: setup creates and mounts a persistent watched version-0 Secret.
+# export NICO_DPF_BMC_ROOT_PASSWORD=<existing-site-wide-password>
 # Otherwise configure it through the API after installation. DPU provisioning
-# waits for the credential; carbide-api startup does not.
+# waits for the credential; carbide-api startup does not in local_first mode.
 
 # RMS (Rack Management Service) installs by default. Set the image tag (there
 # is no safe default), or pass --skip-rms to setup.sh to opt out:
@@ -115,6 +115,7 @@ For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.n
 | `NICO_REST_IMAGE_TAG` | Unless `--skip-rest` | NICo REST image tag (e.g. `v2.0.0`). |
 | `KUBECONFIG` | No | Path to the target cluster kubeconfig. Omit when the current `kubectl` context is already correct. |
 | `NICO_DPF_DPU_INTERFACE`, `NICO_DPF_DPU_CLUSTER_VIP` | **Yes**, unless `--skip-dpf` | DPF DPU provisioning (default-on): the control-plane NIC facing the DPUs and a free DPU-routable VIP for the DPU cluster control plane. See [helm-prereqs → DPF](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf). |
+| `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password. When set, setup stores it in `nico-system/nico-bmc-v0-credentials` and makes that watched Secret the authoritative local version-0 source. When omitted, setup reuses its marked Secret or leaves version 0 backend-managed. A rerun rejects a different value, and using the variable with `--skip-core` or `--skip-dpf` is an error. |
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
 
 ### 3b. Set your Site Name

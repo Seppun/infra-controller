@@ -82,6 +82,13 @@
 #                          label on this cluster's control-plane nodes.
 #                          Default: "" (the kubeadm convention); set to "true"
 #                          on distributions that label with a value.
+#   NICO_DPF_BMC_ROOT_PASSWORD
+#                          Site-wide BMC root password used to seed a
+#                          setup-managed version-0 credential Secret before
+#                          the single Core rollout. Optional when DPF is
+#                          installed; rejected with --skip-core or --skip-dpf.
+#                          When unset, setup reuses its existing Secret or
+#                          leaves the credential backend-managed.
 #   NICO_DPF_DPU_AGENT_CHART_VERSION
 #                          Helm chart version for nico-dpu-agent. Defaults to the
 #                          version baked into the carbide-api binary at build time
@@ -219,6 +226,31 @@ case "${INSTALL_RMS}" in
     true|false) ;;
     *) echo "Error: NICO_INSTALL_RMS must be true or false (got '${INSTALL_RMS}')"; exit 1 ;;
 esac
+
+# Keep the password in this shell only. It is setup input, not runtime
+# configuration, and must not be inherited by preflight, Helm, or kubectl.
+# Disable xtrace while capturing it so --debug cannot print the plaintext.
+_BMC_V0_CAPTURE_RESTORE_XTRACE=false
+if [[ "$-" == *x* ]]; then
+    set +x
+    _BMC_V0_CAPTURE_RESTORE_XTRACE=true
+fi
+_BMC_V0_BOOTSTRAP_PASSWORD="${NICO_DPF_BMC_ROOT_PASSWORD:-}"
+unset NICO_DPF_BMC_ROOT_PASSWORD
+if ! "${INSTALL_DPF}" && [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+    echo "Error: NICO_DPF_BMC_ROOT_PASSWORD cannot be used with --skip-dpf." >&2
+    echo "  Unset the variable or install DPF." >&2
+    exit 1
+fi
+if "${SKIP_CORE}" && [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+    echo "Error: NICO_DPF_BMC_ROOT_PASSWORD cannot be used with --skip-core." >&2
+    echo "  Unset the variable or install NICo Core." >&2
+    exit 1
+fi
+if "${_BMC_V0_CAPTURE_RESTORE_XTRACE}"; then
+    set -x
+fi
+unset _BMC_V0_CAPTURE_RESTORE_XTRACE
 
 # The predecessor Flow chart bundled PSM and NSM in the Flow Deployment. This
 # release does not provide an automatic migration for those workloads. Stop
@@ -369,6 +401,140 @@ _KAMAJI_WH_RELAXED=false
 # retries the cleanup so legacy plaintext credentials cannot survive a failure
 # in an earlier installation phase.
 _LEGACY_DPF_BOOTSTRAP_CLEANED=false
+_BMC_V0_BOOTSTRAP_SECRET_NAME="nico-bmc-v0-credentials"
+_BMC_V0_BOOTSTRAP_SECRET_KEY="credentials.yaml"
+_BMC_V0_BOOTSTRAP_PURPOSE="bmc-site-wide-root-v0"
+_BMC_V0_BOOTSTRAP_ENABLED=false
+_CORE_VALUES_INSPECTOR_CHART="${SCRIPT_DIR}/internal/core-values-inspector"
+
+_nico_api_credential_file_secret_name() {
+    local _file="$1"
+    local _rendered=""
+
+    if ! _rendered="$(helm template core-values-inspector \
+            "${_CORE_VALUES_INSPECTOR_CHART}" \
+            -f "${_file}" \
+            --show-only templates/credential-file-secret-name.yaml)"; then
+        echo "Error: could not parse nico-api credential-file values in ${_file}." >&2
+        return 1
+    fi
+
+    printf '%s\n' "${_rendered}" | awk '
+        /^[[:space:]]*\{"credentialFileSecretName":/ {
+            sub(/^[[:space:]]*/, "")
+            print
+            exit
+        }
+    ' | jq -er '.credentialFileSecretName | strings'
+}
+
+_prepare_bmc_v0_bootstrap_secret_untraced() {
+    local _configured_secret="${1:-}"
+    local _secret_json=""
+    local _purpose=""
+    local _encoded_credentials=""
+    local _existing_password_b64=""
+    local _bootstrap_password_b64=""
+
+    _BMC_V0_BOOTSTRAP_ENABLED=false
+
+    if [[ -n "${_configured_secret}" && \
+          "${_configured_secret}" != "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" ]]; then
+        if [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+            echo "Error: NICO_DPF_BMC_ROOT_PASSWORD cannot replace the configured credential-file Secret '${_configured_secret}'." >&2
+            echo "  Add bmc_site_wide_root to that Secret and omit the environment variable." >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    if ! _secret_json="$(kubectl get secret "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" \
+            -n nico-system --ignore-not-found -o json)"; then
+        echo "Error: could not inspect Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME}." >&2
+        return 1
+    fi
+
+    if [[ -n "${_secret_json}" ]]; then
+        _purpose="$(jq -r \
+            '.metadata.annotations["nico.nvidia.com/credential-purpose"] // ""' \
+            <<< "${_secret_json}")"
+        if [[ "${_purpose}" != "${_BMC_V0_BOOTSTRAP_PURPOSE}" ]]; then
+            if [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+                echo "Error: Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME} exists but is not managed by setup.sh." >&2
+                echo "  Rename it, configure it explicitly without NICO_DPF_BMC_ROOT_PASSWORD, or remove it after verifying it is unused." >&2
+                return 1
+            fi
+            return 0
+        fi
+
+        if ! _encoded_credentials="$(jq -er \
+                --arg key "${_BMC_V0_BOOTSTRAP_SECRET_KEY}" \
+                '.data[$key] | strings' <<< "${_secret_json}")" || \
+           ! _existing_password_b64="$(printf '%s' "${_encoded_credentials}" | base64 -d | \
+                jq -jer 'select(.bmc_site_wide_root.username == "admin") | .bmc_site_wide_root.password | strings | select(length > 0)' | \
+                base64 | tr -d '\n')"; then
+            echo "Error: setup-managed Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME} is malformed." >&2
+            return 1
+        fi
+        if [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+            _bootstrap_password_b64="$(printf '%s' "${_BMC_V0_BOOTSTRAP_PASSWORD}" | \
+                base64 | tr -d '\n')"
+            if [[ "${_existing_password_b64}" != "${_bootstrap_password_b64}" ]]; then
+                echo "Error: NICO_DPF_BMC_ROOT_PASSWORD differs from the existing setup-managed version-0 credential." >&2
+                echo "  setup.sh will not replace a credential that managed hardware may already use." >&2
+                return 1
+            fi
+        fi
+
+        _BMC_V0_BOOTSTRAP_ENABLED=true
+        echo "Reusing setup-managed site-wide BMC version-0 Secret"
+        return 0
+    fi
+
+    if [[ -n "${_configured_secret}" && -z "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+        echo "Error: configured credential-file Secret nico-system/${_configured_secret} does not exist." >&2
+        echo "  Create it or set NICO_DPF_BMC_ROOT_PASSWORD so setup.sh can seed it." >&2
+        return 1
+    fi
+
+    [[ -z "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]] && return 0
+
+    if ! printf '%s' "${_BMC_V0_BOOTSTRAP_PASSWORD}" | \
+        jq -Rs '{bmc_site_wide_root: {username: "admin", password: .}}' | \
+        kubectl create secret generic "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" \
+            -n nico-system \
+            --from-file="${_BMC_V0_BOOTSTRAP_SECRET_KEY}=/dev/stdin" \
+            --dry-run=client -o json | \
+        jq --arg purpose "${_BMC_V0_BOOTSTRAP_PURPOSE}" '
+            .metadata.labels = ((.metadata.labels // {}) +
+                {"app.kubernetes.io/managed-by": "helm-prereqs"}) |
+            .metadata.annotations = ((.metadata.annotations // {}) +
+                {"nico.nvidia.com/credential-purpose": $purpose})
+        ' | kubectl create -f - >/dev/null; then
+        echo "Error: could not create Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME}." >&2
+        return 1
+    fi
+
+    _BMC_V0_BOOTSTRAP_ENABLED=true
+    echo "Created setup-managed site-wide BMC version-0 Secret"
+}
+
+_prepare_bmc_v0_bootstrap_secret() {
+    local _restore_xtrace=false
+    local _prepare_rc=0
+
+    # This function reads and decodes the credential. Keep the complete path
+    # out of bash xtrace even when setup runs with --debug.
+    if [[ "$-" == *x* ]]; then
+        set +x
+        _restore_xtrace=true
+    fi
+    _prepare_bmc_v0_bootstrap_secret_untraced "$@" || _prepare_rc=$?
+    if "${_restore_xtrace}"; then
+        set -x
+    fi
+    return "${_prepare_rc}"
+}
 
 _cleanup_legacy_dpf_bootstrap_credentials() {
     local _job_rc=0
@@ -1259,6 +1425,10 @@ else
     _CORE_VALUES_FILE="${CORE_VALUES:-${SCRIPT_DIR}/values/nico-core.yaml}"
     _CORE_VALUES_ARG="${CORE_VALUES:-helm-prereqs/values/nico-core.yaml}"
 
+    _CONFIGURED_CREDENTIAL_FILE_SECRET="$(_nico_api_credential_file_secret_name \
+        "${_CORE_VALUES_FILE}")"
+    _prepare_bmc_v0_bootstrap_secret "${_CONFIGURED_CREDENTIAL_FILE_SECRET}"
+
     if "${INSTALL_DPF}"; then
         # Render one DPF-enabled values file. carbide-api's production DPF SDK
         # always runs a 60 s BMC credential refresh. local_first/backend may
@@ -1379,6 +1549,13 @@ else
         # Create the nico-api-dpf Role/RoleBinding in dpf-operator-system so
         # carbide-api can manage DPF CRs (chart template dpf-rbac.yaml).
         NICO_CORE_CMD+=(--set "nico-api.dpf.rbacCreate=true")
+    fi
+    if "${_BMC_V0_BOOTSTRAP_ENABLED}"; then
+        NICO_CORE_CMD+=(
+            --set-string "nico-api.credentials.bmcSiteWideRootSource=local"
+            --set-string "nico-api.credentials.file.existingSecret.name=${_BMC_V0_BOOTSTRAP_SECRET_NAME}"
+            --set-string "nico-api.credentials.file.existingSecret.key=${_BMC_V0_BOOTSTRAP_SECRET_KEY}"
+        )
     fi
     _NICO_CORE_CMD_DISPLAY=""
     for _arg in "${NICO_CORE_CMD[@]}"; do

@@ -11,8 +11,8 @@ export NICO_REST_IMAGE_TAG=<nico-rest-image-tag>      # unless using --skip-rest
 # DPF DPU provisioning installs by DEFAULT — set these two, or pass --skip-dpf:
 export NICO_DPF_DPU_INTERFACE=<control-plane-nic>     # NIC facing the DPUs
 export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plane VIP
-# Supply the site-wide BMC root through a watched credential-file Secret or
-# configure it through the API after install, before DPU provisioning.
+# Optional: seed the watched version-0 credential Secret before Core starts.
+# export NICO_DPF_BMC_ROOT_PASSWORD=<existing-site-wide-password>
 
 ./setup.sh        # interactive - prompts before deploying Core and REST
 ./setup.sh -y     # non-interactive - deploys everything (DPF included)
@@ -102,13 +102,13 @@ config it edits.
    secret) — see *Environment variables* below.
 8. **DPF (DPU provisioning) — on by default.** Unless you pass `--skip-dpf`,
    export `NICO_DPF_DPU_INTERFACE` (the control-plane NIC facing the DPUs),
-   and `NICO_DPF_DPU_CLUSTER_VIP` (a free, DPU-routable IP). Supply the
-   site-wide BMC root through the watched credential-file Secret described in
-   *DPF* below, or configure it through the API after installation and before
-   provisioning a DPU. DPF images pull anonymously from public NGC by default —
-   set the `NICO_DPF_IMAGE_*` vars only for your own/mirrored registry. Sites
-   with no DPUs (or still on iPXE) run `./setup.sh -y --skip-dpf` and can ignore
-   these.
+   and `NICO_DPF_DPU_CLUSTER_VIP` (a free, DPU-routable IP). Optionally export
+   `NICO_DPF_BMC_ROOT_PASSWORD`; setup stores it in a persistent watched Secret
+   before the single Core rollout. Otherwise configure the credential through
+   the API after installation and before provisioning a DPU. DPF images pull
+   anonymously from public NGC by default — set the `NICO_DPF_IMAGE_*` vars only
+   for your own/mirrored registry. Sites with no DPUs (or still on iPXE) run
+   `./setup.sh -y --skip-dpf` and can ignore these.
 
 9. **[RMS (Rack Management Service)](https://docs.nvidia.com/rms/documentation/home/) - on by default.**
    Unless you pass `--skip-rms`, export `NICO_RMS_IMAGE_TAG` (required; the
@@ -187,6 +187,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_DPF_K8S_API_VIP` / `NICO_DPF_K8S_API_PORT` | No | Host-cluster API server address/port that DPUs must reach. Defaults are derived from the `kubernetes` Endpoints — override when the derived address is not routable from the DPUs. |
 | `NICO_DPF_DPU_INTERFACE` | Unless `--skip-dpf` | Controller interface on which keepalived advertises the DPU cluster VIP. |
 | `NICO_DPF_DPU_CLUSTER_VIP` | Unless `--skip-dpf` | Floating IP the DPUs use to reach their (Kamaji) control plane. |
+| `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password used to seed `nico-system/nico-bmc-v0-credentials` before Core starts. setup.sh stores username `admin`, mounts the Secret as the authoritative version-0 credential source, and unsets the variable before invoking child tools. A rerun reuses the Secret and rejects a different value rather than changing a credential managed hardware may use. Using it with `--skip-core` or `--skip-dpf` is an error. |
 | `NICO_DPF_METALLB_POOL` | No | MetalLB address pool used to advertise the DPU cluster VIP. When unset, the VIP LoadBalancer Service is skipped — the VIP must then be routable from the DPUs by other means. |
 | `NICO_DPF_IMAGE_REPO` | No | DPF operator image repository. Defaults to the public `nvcr.io/nvidia/doca/dpf-system`. Point at your own registry (mirror or self-built) to match where you push Core/REST images. See [DPF images and registries](#dpf-images-and-registries). |
 | `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to `NICO_DPF_VERSION`. Set separately when your self-built image uses a different tag than the chart version. |
@@ -528,15 +529,35 @@ full background, BF4 opt-in, proxy configuration, and troubleshooting.
 
 On an upgrade, the backward-compatible `local_first` default continues to use
 an existing backend-owned version 0 credential; no Secret migration is
-required. setup.sh does not accept, overwrite, or clear the BMC root on a
-rerun, and Core remains DPF-enabled throughout its single rollout. The Core
-chart hashes its ConfigMap inputs into the pod template, so a changed site
-config rolls `nico-api` even when the image tag is unchanged; an unchanged
-rerun does not restart it.
+required when `NICO_DPF_BMC_ROOT_PASSWORD` is unset. If it is set, setup creates
+`nico-system/nico-bmc-v0-credentials`, configures it as the authoritative local
+version-0 source, and deploys Core once. A later run reuses that Secret even
+when the variable is omitted. Supplying a different value fails rather than
+silently changing a credential managed hardware may use. The Core chart hashes
+its ConfigMap inputs into the pod template, so a changed site config rolls
+`nico-api` even when the image tag is unchanged; an unchanged rerun does not
+restart it.
 
-To provide the BMC root non-interactively before Core starts, create an
-operator-managed Secret containing a sparse credential file. The file may
-contain only `bmc_site_wide_root`:
+For the setup-managed path, export the existing site-wide password before the
+first run that should adopt local ownership:
+
+```bash
+export NICO_DPF_BMC_ROOT_PASSWORD=<existing-site-wide-password>
+./setup.sh
+```
+
+setup captures and unsets the variable before running child tools. It writes a
+sparse JSON credential file with username `admin` into the persistent Secret,
+marks the Secret as setup-managed, and passes the Secret mount and
+`bmcSiteWideRootSource: local` directly to Helm. It never passes the password to
+the admin CLI or places it in a command argument. These setup-provided Helm
+flags take precedence over matching values in the Core values file.
+The `admin` username preserves the former setup workflow. For a manually
+managed file, use the site's BMC root account name instead.
+
+To combine the BMC credential with other local credentials, such as UFM, manage
+the credential-file Secret yourself instead. The file may contain only
+`bmc_site_wide_root`, or include it alongside the other supported entries:
 
 ```bash
 kubectl create namespace nico-system --dry-run=client -o yaml | kubectl apply -f -
@@ -571,6 +592,9 @@ Both the Secret and the `existingSecret`/`bmcSiteWideRootSource: local` values
 must be in place before phase 6. The pod cannot mount a missing Secret. Creating
 the Secret after installation is not sufficient by itself; also update the Core
 values and roll out Core so the file is mounted and local ownership is enabled.
+Do not also set `NICO_DPF_BMC_ROOT_PASSWORD` when the Core values name a
+different credential-file Secret; setup fails rather than replacing or hiding
+that operator-managed file.
 The file then remains watched. Before any managed device uses version 0, a
 Secret update can supply or correct it without restarting Core. After ingestion
 starts, keep version 0 unchanged: replacing only the source value does not

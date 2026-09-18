@@ -50,6 +50,8 @@ DPUs, or that still use the deprecated iPXE DPU path.
 export NICO_DPF_DPU_INTERFACE=<controller-interface>   # keepalived interface for the DPU cluster VIP
 export NICO_DPF_DPU_CLUSTER_VIP=<vip>                  # VIP the DPUs use to reach their control plane
 export NICO_DPF_METALLB_POOL=<pool>                    # optional: MetalLB pool advertising the VIP
+# Optional: seed a persistent watched version-0 credential Secret.
+# export NICO_DPF_BMC_ROOT_PASSWORD=<existing-site-wide-password>
 # Optional: pin NICo-owned DPF service chart versions when testing a dev/PR
 # image whose baked-in version was never published to the chart registry.
 # Point at the latest published version (e.g. most recent main build tag).
@@ -71,7 +73,7 @@ The following table maps the sections on this page to what the run does:
 | §2 [Operator install](#2-dpf-installation) | Clones `NVIDIA/doca-platform` at `NICO_DPF_VERSION` (default `v26.4.0`, cached under `helm-prereqs/.dpf-src/`) and installs `deploy/charts/dpf-operator`.<br/><br/>The in-repo source chart ships an empty `controllerManager.image`, so setup.sh sets it to `nvcr.io/nvidia/doca/dpf-system:$NICO_DPF_VERSION` (override with `NICO_DPF_IMAGE_REPO`).<br/><br/>The GA `nvidia/doca` images are **public**, so they pull anonymously by default — a registry-scoped pull secret without `nvidia/doca` entitlement makes nvcr.io 403 the pull. Set `NICO_DPF_IMAGE_PULL_SECRET` only for private DPF/DOCA registries. |
 | §3.1 [RBAC](#31-rbac-for-the-nico-orchestrator) | Created by the NICo Core chart (`nico-api.dpf.rbacCreate=true`, set automatically) — the Role/RoleBinding subject is the chart's actual ServiceAccount. |
 | §3.2–3.4 CRs  | [DPFOperatorConfig](#32-dpfoperatorconfig) (API VIP/port derived from the `kubernetes` Endpoints unless `NICO_DPF_K8S_API_VIP/PORT` are set), [DPUCluster](#33-dpucluster), and the optional [VIP LoadBalancer Service](#34-vip-loadbalancer-service-and-endpoints) are applied from `helm-prereqs/operators/dpf/`. |
-| §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-start-carbide-api-to-create-the-dpf-initialization-objects) | `setup.sh` renders `[dpf].enabled = true` and deploys Core once after the DPF prerequisites are ready. carbide-api initializes the DPF SDK and creates the BFB, DPUFlavor, and DPUDeployment on that first startup.<br/><br/>The site-wide BMC root may come from an operator-managed credential-file Secret mounted before installation or be configured through the API later. In `local_first` or `backend` mode, a fresh site starts without it and the 60-second refresh writes the derived current-version `bmc-shared-password` Secret after the credential becomes available. Authoritative `local` mode requires version 0 before startup when v0 is current or the current target cannot be resolved. |
+| §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-start-carbide-api-to-create-the-dpf-initialization-objects) | `setup.sh` renders `[dpf].enabled = true` and deploys Core once after the DPF prerequisites are ready. carbide-api initializes the DPF SDK and creates the BFB, DPUFlavor, and DPUDeployment on that first startup.<br/><br/>When `NICO_DPF_BMC_ROOT_PASSWORD` is set, setup creates or reuses a persistent watched version-0 credential Secret and configures local ownership before that rollout. Otherwise the credential may come from an operator-managed credential-file Secret or be configured through the API later. In `local_first` or `backend` mode, a fresh site starts without it and the 60-second refresh writes the derived current-version `bmc-shared-password` Secret after the credential becomes available. Authoritative `local` mode requires version 0 before startup when v0 is current or the current target cannot be resolved. |
 
 [Per-host enablement](#37-mark-hosts-as-dpf-managed-in-expected-machines) (§3.7) and the [CLI appendix](#appendix-nico-admin-cli-dpf-command-reference) still apply unchanged. The sections below remain the reference for what is being installed, for manual installs, and for environments not using `setup.sh`.
 
@@ -89,10 +91,12 @@ on both fresh and existing DPF sites whenever v0 is current or the current
 target cannot be resolved. If the rotation target cannot be read, a present
 local v0 permits startup and retry.
 
-For a non-interactive installation, mount an operator-managed Kubernetes Secret
-as the watched credential file before phase 6. Otherwise configure the BMC root
-through the API later. Both paths are described in
-[§3.6](#36-set-the-site-wide-bmc-root-credential).
+For a non-interactive installation, set `NICO_DPF_BMC_ROOT_PASSWORD` and setup
+creates and mounts `nico-system/nico-bmc-v0-credentials` before phase 6. It
+reuses the Secret on later runs and rejects a different value. Sites combining
+the BMC root with other local credentials can instead mount their own watched
+credential-file Secret. Otherwise configure the BMC root through the API later.
+All paths are described in [§3.6](#36-set-the-site-wide-bmc-root-credential).
 
 <Info title="Clusters without DPUs">
 The DPF operator, Kamaji `DPUCluster`, and carbide-api all come up, but `DPFOperatorConfig` stays `Ready=False` until its DPU-side services (multus, flannel, sriov-device-plugin, ovs-cni, sfc-controller, and so on) schedule — which needs actual DPU nodes. On a cluster with no BlueField hardware this is expected, not an error.
@@ -1184,6 +1188,15 @@ credential rotation and tracked by
 
 Configure it through a watched Kubernetes Secret, through the API, or by seeding
 the persistent credential store directly.
+
+**Through setup.sh**, export `NICO_DPF_BMC_ROOT_PASSWORD` before running setup.
+The script creates or reuses `nico-system/nico-bmc-v0-credentials`, stores the
+credential with username `admin`, and passes Helm overrides that mount it and
+select authoritative `local` ownership. Those command-line overrides take
+precedence over the matching Core values. On later runs, setup reuses its marked
+Secret without requiring the variable; if the variable is supplied with a
+different value, setup fails rather than replacing version 0. This path cannot
+replace a different credential-file Secret named in the Core values.
 
 **Through a watched Secret**, configure the `nico-api` chart to mount a sparse
 credential file containing only `bmc_site_wide_root`. The exact Secret creation

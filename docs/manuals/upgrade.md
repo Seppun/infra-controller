@@ -205,25 +205,30 @@ v0 is current or the current target cannot be resolved.
 The backward-compatible default is
 `nico-api.credentials.bmcSiteWideRootSource: local_first`. An existing
 backend-owned version 0 credential therefore remains in use without a new
-Secret. `setup.sh` no longer accepts a BMC password, writes the credential, or
-clears it during a rerun. It deploys Core once with DPF enabled. If coordinated
-BMC rotation has advanced the target to version 1 or later, that version remains
-backend-resolved. A rerun also removes the obsolete `dpf-set-bmc-root` Job and
-its `dpf-bmc-root-pw` and `dpf-admincli-cert` Secrets if an interrupted older
-setup left them behind.
+Secret when `NICO_DPF_BMC_ROOT_PASSWORD` is unset. When it is set, setup creates
+`nico-system/nico-bmc-v0-credentials`, configures authoritative local ownership,
+and deploys Core once with DPF enabled. A rerun reuses that Secret even if the
+variable is omitted; a different supplied value fails rather than overwriting
+version 0. If coordinated BMC rotation has advanced the target to version 1 or
+later, that version remains backend-resolved. A rerun also removes the obsolete
+`dpf-set-bmc-root` Job and its `dpf-bmc-root-pw` and `dpf-admincli-cert` Secrets
+if an interrupted older setup left them behind.
 
 To opt into local ownership of version 0, first create a Kubernetes Secret whose
 sparse credential file contains the exact existing version 0 value. Then add
 both `nico-api.credentials.file.existingSecret` and
 `nico-api.credentials.bmcSiteWideRootSource: local` to the persistent Core
-values before rerunning `setup.sh`. Ensure the environment credential source
-does not also supply this entry, because it precedes the file. A Secret created
-without the values update is not mounted. With DPF enabled, carbide-api requires
-local v0 before starting on fresh and existing sites. This prevents a rolling
-update from activating local ownership while an older replica can still
-register a DPU that uses the shared credential. A transient rotation-target
-read failure does not block startup when local v0 is present. After NICo accepts
-local v0, removing it
+values before rerunning `setup.sh`. As a shortcut when no other credential-file
+Secret is configured, export the exact existing value as
+`NICO_DPF_BMC_ROOT_PASSWORD`; setup creates and wires its dedicated Secret. Do
+not use that shortcut when the Core values name another credential-file Secret.
+Ensure the environment credential source does not also supply this entry,
+because it precedes the file. A Secret created without the values update is not
+mounted. With DPF enabled, carbide-api requires local v0 before starting on
+fresh and existing sites. This prevents a rolling update from activating local
+ownership while an older replica can still register a DPU that uses the shared
+credential. A transient rotation-target read failure does not block startup
+when local v0 is present. After NICo accepts local v0, removing it
 retains the last
 accepted shared Secret and logs an error until the original value is restored.
 The default pinned DPF v26.4.0 does not support BMC credential rotation;
