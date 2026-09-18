@@ -24,28 +24,15 @@
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1
-ENV VAULT_VERSION="1.16.1"
 
 # Install various necessary tools
 RUN apt-get update && \
     apt-get install -y \
     curl \
     jq \
-    openssh-client \
-    wget \
-    unzip
+    openssh-client
 
 RUN rm -rf /var/lib/apt/lists/*
-
-# Install Vault CLI
-RUN arch="$(dpkg --print-architecture)" && \
-    binary="vault_${VAULT_VERSION}_linux_${arch}.zip" && \
-    cd /tmp && \
-    wget --no-verbose https://releases.hashicorp.com/vault/${VAULT_VERSION}/${binary} && \
-    wget --no-verbose https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_SHA256SUMS && \
-    grep ${binary} vault_${VAULT_VERSION}_SHA256SUMS | sha256sum -c && \
-    unzip ${binary} -d /usr/local/bin/ vault && \
-    rm -f ${binary} vault_${VAULT_VERSION}_SHA256SUMS
 
 # kubectl - the admin-cli runs in-pod via `kubectl exec`
 ARG KUBECTL_VERSION=v1.31.4

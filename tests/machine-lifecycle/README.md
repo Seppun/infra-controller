@@ -110,7 +110,7 @@ docker buildx build \
   --push .
 ```
 
-The image contains Python, `uv`, `kubectl`, and the Vault CLI. It deliberately
+The image contains Python, `uv`, and `kubectl`. It deliberately
 does not contain `nico-admin-cli`; MLT executes the binary belonging to the
 running NICo API pod.
 
