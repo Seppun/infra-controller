@@ -400,12 +400,12 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 Ok(Some(delta)) => (delta.power(), delta.fan_speed_target()),
                 Ok(None) => (None, None),
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         ?error,
                         power_supply = %entity.raw().odata_id,
                         bmc_address = ?self.endpoint.addr,
                         rack_id = self.endpoint.rack_id.as_ref().map(tracing::field::display),
-                        "Failed to parse Delta OEM power supply data"
+                        "Ignoring unparsable Delta OEM power supply data"
                     );
                     (None, None)
                 }
@@ -842,10 +842,12 @@ mod bmc_mock_integration_tests {
 
     /// Delta reports capacity as the *standard* `PowerCapacityWatts`, unlike
     /// LiteOn's non-standard OEM string. This proves the existing
-    /// standard-field-wins branch in `discover_power_supplies` already
-    /// covers Delta with no vendor-specific code: `oem_capacity_watts` must
-    /// stay `None` for every supply, since the OEM fallback must never run
-    /// when the standard field is already present.
+    /// standard-field-wins branch in `discover_power_supplies` already covers
+    /// Delta with no vendor-specific code: every supply emits
+    /// `powersupply_capacity` from the standard field while the OEM fallback
+    /// stays unused. Asserting only that `oem_capacity_watts` is `None` would
+    /// hold for any non-LiteOn chassis regardless of the standard field, so
+    /// the emitted metric is the observation that can fail.
     #[tokio::test]
     async fn delta_supplies_resolve_capacity_from_standard_field() {
         let h = bmc_mock::test_support::delta_powershelf_bmc().await;
@@ -882,21 +884,31 @@ mod bmc_mock_integration_tests {
             )
             .await;
 
-        let oem_fallbacks: Vec<_> = entities
+        let supplies: Vec<_> = entities
             .iter()
             .filter_map(|entity| match entity {
                 DiscoveredEntity::PowerSupply {
                     oem_capacity_watts, ..
-                } => Some(*oem_capacity_watts),
+                } => Some((*oem_capacity_watts, entity.derived_metrics())),
                 _ => None,
             })
             .collect();
 
-        assert_eq!(oem_fallbacks.len(), 6, "Delta fixture exposes 6 PSU bays");
-        assert!(
-            oem_fallbacks.iter().all(Option::is_none),
-            "standard PowerCapacityWatts must win; OEM fallback must stay unused: {oem_fallbacks:?}"
-        );
+        assert_eq!(supplies.len(), 6, "Delta fixture exposes 6 PSU bays");
+        for (oem_capacity_watts, metrics) in &supplies {
+            let capacity: Vec<_> = metrics
+                .iter()
+                .filter(|metric| metric.metric_type == "powersupply_capacity")
+                .map(|metric| (metric.unit, metric.value))
+                .collect();
+
+            assert_eq!(capacity, vec![("watts", 5500.0)]);
+            assert_eq!(
+                *oem_capacity_watts, None,
+                "the OEM fallback must stay unused when the standard field is present"
+            );
+        }
+
         assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
     }
 
@@ -972,7 +984,8 @@ mod bmc_mock_integration_tests {
         assert_eq!(power_by_id, expected_power);
         assert!(
             fan_speed_by_id.values().all(|v| *v == Some(0)),
-            "fixture sets FanSpeedTarget 0 for every PSU: {fan_speed_by_id:?}"
+            "a PSU-controlled fan reports FanSpeedTarget 0, which must stay \
+             distinguishable from an absent field: {fan_speed_by_id:?}"
         );
         assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
     }

@@ -92,16 +92,14 @@ impl PowerSupplyBuilder {
     }
 
     /// Delta Energy Systems reports per-PSU power state under
-    /// `Oem.deltaenergysystems.Power` (not the standard `PowerState` field),
-    /// alongside a `FanSpeedTarget`. Mirrors the shape served by real Delta
-    /// power shelves.
+    /// `Oem.deltaenergysystems.Power` rather than the standard `PowerState`
+    /// field. Mirrors the shape served by real Delta power shelves.
     pub(crate) fn oem_delta_power_state(self, v: bool) -> Self {
         self.apply_patch(json!({
             "Oem": {
                 "deltaenergysystems": {
                     "@odata.type": "#DeltaEnergySystemsPowerSupply.v1_0_0.PowerSupply",
-                    "Power": v,
-                    "FanSpeedTarget": 0
+                    "Power": v
                 }
             }
         }))
@@ -113,13 +111,10 @@ impl PowerSupplyBuilder {
         self.apply_patch(json!({"PowerCapacityWatts": v}))
     }
 
-    /// Sets `Oem.deltaenergysystems.FanSpeedTarget` without disturbing
-    /// `Power` set by a prior `oem_delta_power_state` call; JSON-patch merges
-    /// the two into one `Oem.deltaenergysystems` object. Call this *after*
-    /// `oem_delta_power_state` in any builder chain: `oem_delta_power_state`
-    /// hardcodes `FanSpeedTarget: 0` in its own patch, so calling this method
-    /// first would have its value overwritten back to 0 by a later
-    /// `oem_delta_power_state` call.
+    /// Sets `Oem.deltaenergysystems.FanSpeedTarget`, the commanded fan speed
+    /// in percent, where `0` means the PSU controls its own fan. JSON-patch
+    /// merges this into the same `Oem.deltaenergysystems` object
+    /// `oem_delta_power_state` writes, so the two compose in either order.
     pub(crate) fn oem_delta_fan_speed_target(self, v: i64) -> Self {
         self.apply_patch(json!({
             "Oem": {
