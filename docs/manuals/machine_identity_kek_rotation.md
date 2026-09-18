@@ -84,7 +84,7 @@ The following examples use direct gRPC. For NICo REST, use the JSON field names 
 
 - The URL `{org}` identifies the provider.
 - A non-null `organizationId` identifies the tenant by its `org` identifier, not by its REST resource UUID or display name. The identifier must contain one or more ASCII letters, digits, underscores, or hyphens. NICo REST matches it case-insensitively, lowercasing it before the Tenant lookup and before forwarding it to Core. The tenant must have an allocation and tenant identity configuration on the selected Site.
-- Omit `organizationId` or set it to JSON `null` to select all organizations. Empty and whitespace-containing strings return Bad Request instead of broadening the scope. An omitted NICo REST request body behaves the same as `{}`, selecting all organizations with `dryRun` defaulted to `false`.
+- Omit `organizationId` or set it to JSON `null` to select all organizations. Empty and whitespace-containing strings return Bad Request instead of broadening the scope.
 - NICo REST returns Bad Request when the tenant is unknown or has no allocation on the selected Site. On either surface, a valid scoped tenant without tenant identity configuration returns Not Found.
 - Direct gRPC trims `organization_id` and treats an omitted or blank value as all organizations. It does not lowercase the value.
 

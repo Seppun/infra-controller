@@ -1078,6 +1078,9 @@ func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error 
 	}
 
 	apiRequest := model.APITenantIdentityReencryptSecretsRequest{}
+	if c.Request().ContentLength == 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Request body is required", nil)
+	}
 	err := c.Bind(&apiRequest)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error binding request data into API model")

@@ -253,6 +253,10 @@ func TestReencryptTenantIdentitySecretsHandler_Handle(t *testing.T) {
 		wantError  string
 	}{
 		{
+			name:      "empty request body is rejected before proxy dispatch",
+			wantError: "Request body is required",
+		},
+		{
 			name:       "omitted organization targets all organizations",
 			body:       `{"dryRun":true}`,
 			wantDryRun: true,
