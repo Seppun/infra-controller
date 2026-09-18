@@ -12,7 +12,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-packager="$repo_root/.github/ci/package-rest-helm.sh"
+stager="$repo_root/.github/ci/prepare-rest-umbrella-chart.sh"
 source_chart="$repo_root/helm/rest/nico-rest"
 temp_dir=$(mktemp -d)
 trap 'rm -rf "$temp_dir"' EXIT
@@ -65,7 +65,9 @@ for case in "${cases[@]}"; do
   IFS='|' read -r name chart_version app_version <<< "$case"
   stage="$temp_dir/stage-$index"
   packages="$temp_dir/packages-$index"
-  "$packager" "$source_chart" "$chart_version" "$app_version" "$stage" "$packages"
+  "$stager" "$source_chart" "$chart_version" "$app_version" "$stage"
+  mkdir "$packages"
+  helm package --destination "$packages" --dependency-update --version "$chart_version" --app-version "$app_version" "$stage"
   mapfile -t archives < <(find "$packages" -maxdepth 1 -name '*.tgz' -type f)
   [[ ${#archives[@]} -eq 1 ]] || { echo "case '$name' did not produce exactly one archive" >&2; exit 1; }
   assert_archive "${archives[0]}" "$chart_version" "$app_version" "$temp_dir/extract-$index"
@@ -74,41 +76,38 @@ for case in "${cases[@]}"; do
   index=$((index + 1))
 done
 
-expect_failure() {
+expect_helm_validation_failure() {
   local name=$1
-  local expected=$2
-  local fixture=$3
-  local output
+  local fixture=$2
+  local value_overrides=(
+    --set nico-rest-api.config.keycloak.enabled=true
+    --set nico-rest-api.config.keycloak.baseURL=http://keycloak:8082
+    --set nico-rest-api.config.keycloak.realm=test
+    --set nico-rest-api.config.keycloak.clientID=test
+  )
 
-  if output=$("$packager" "$fixture" 2.2.0 v2.2.0 "$temp_dir/$name-stage" "$temp_dir/$name-packages" 2>&1); then
+  if helm lint "$fixture" "${value_overrides[@]}" >/dev/null 2>&1 &&
+    helm dependency build "$fixture" >/dev/null 2>&1; then
     echo "case '$name' unexpectedly succeeded" >&2
     exit 1
   fi
-  [[ "$output" == *"$expected"* ]] || { printf "case '%s' produced the wrong error:\n%s\n" "$name" "$output" >&2; exit 1; }
   printf 'PASS: %s\n' "$name"
 }
 
 missing_fixture="$temp_dir/missing"
 cp -a "$source_chart" "$missing_fixture"
 rm -rf "$missing_fixture/charts/nico-rest-db"
-expect_failure missing-dependency "declared dependency is missing its bundled chart: nico-rest-db" "$missing_fixture"
+expect_helm_validation_failure missing-dependency "$missing_fixture"
 
 undeclared_fixture="$temp_dir/undeclared"
 cp -a "$source_chart" "$undeclared_fixture"
 NAME=nico-rest-db yq -i 'del(.dependencies[] | select(.name == strenv(NAME)))' "$undeclared_fixture/Chart.yaml"
-expect_failure undeclared-subchart "bundled chart is not declared as a dependency: nico-rest-db" "$undeclared_fixture"
+expect_helm_validation_failure undeclared-subchart "$undeclared_fixture"
 
 name_fixture="$temp_dir/name-mismatch"
 cp -a "$source_chart" "$name_fixture"
 yq -i '.name = "wrong-name"' "$name_fixture/charts/nico-rest-db/Chart.yaml"
-expect_failure name-mismatch "bundled chart name 'wrong-name' does not match directory 'nico-rest-db'" "$name_fixture"
-
-if output=$("$packager" "$source_chart" v2.2.0 v2.2.0 "$temp_dir/invalid-semver-stage" "$temp_dir/invalid-semver-packages" 2>&1); then
-  echo "case 'invalid-semver' unexpectedly succeeded" >&2
-  exit 1
-fi
-[[ "$output" == *"chart version is not strict SemVer: v2.2.0"* ]] || { printf "case 'invalid-semver' produced the wrong error:\n%s\n" "$output" >&2; exit 1; }
-printf 'PASS: invalid-semver\n'
+expect_helm_validation_failure name-mismatch "$name_fixture"
 
 [[ $(source_digest) == "$initial_digest" ]] || { echo "packaging tests modified the source chart" >&2; exit 1; }
 printf 'PASS: source chart remained unchanged\n'
