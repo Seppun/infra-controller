@@ -201,6 +201,8 @@ func (i *ipamer) acquireChildPrefixInternal(ctx context.Context, parentCidr, chi
 		if err != nil {
 			return nil, err
 		}
+		// The parent reservation must match the masked CIDR used to release the child.
+		childprefix = childprefix.Masked()
 		length = childprefix.Bits()
 	}
 	if ipprefix.Bits() >= length {
