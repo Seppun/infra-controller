@@ -393,6 +393,9 @@ envFrom:
   nicoWebHostname:
     configMapName: nico-web-api-hostname
 
+# Both probes target port 1080, which only exists when `metrics_endpoint` is
+# set in the API config (see carbide-api-config.toml). Removing that setting
+# leaves the pod permanently un-Ready with no other indication why.
 livenessProbe:
   httpGet:
     path: /health

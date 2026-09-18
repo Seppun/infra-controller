@@ -148,7 +148,7 @@ pub async fn run(
     health_controller.set_ready(true);
     crate::readiness::spawn_database_readiness_probe(
         &mut join_set,
-        db_pool.clone(),
+        &db_pool,
         health_controller,
         cancel_token.clone(),
     )?;

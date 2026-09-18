@@ -25,6 +25,7 @@ use std::time::Duration;
 use carbide_instrument::emit;
 use metrics_endpoint::HealthController;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -60,7 +61,7 @@ struct DatabaseReadinessCheckFailed {
 /// is cancelled.
 pub(crate) fn spawn_database_readiness_probe(
     join_set: &mut JoinSet<()>,
-    db_pool: PgPool,
+    db_pool: &PgPool,
     health_controller: HealthController,
     cancel_token: CancellationToken,
 ) -> eyre::Result<()> {
@@ -68,12 +69,32 @@ pub(crate) fn spawn_database_readiness_probe(
         .build_task()
         .name("database_readiness_probe")
         .spawn(run_database_readiness_probe(
-            db_pool,
+            dedicated_probe_pool(db_pool),
             health_controller,
             cancel_token,
             READINESS_CHECK_INTERVAL,
         ))?;
     Ok(())
+}
+
+/// A single dedicated connection for the readiness probe, separate from the
+/// application's shared `db_pool`. A busy shared pool cannot delay or fail
+/// this check, and because there is only ever one probe connection, the
+/// check is a deliberate "is my endpoint writable" test rather than whichever
+/// connection the shared pool happens to hand back -- important right after a
+/// failover, when the shared pool can still hold connections to the demoted
+/// node alongside fresh ones to the new primary. Mirrors
+/// `create_work_lock_pool` (`crates/api-db/src/work_lock_manager.rs`). Lazy:
+/// does not touch the network until the first check runs.
+fn dedicated_probe_pool(db_pool: &PgPool) -> PgPool {
+    let options = db_pool.options();
+    PgPoolOptions::new()
+        .min_connections(1)
+        .max_connections(1)
+        .acquire_timeout(options.get_acquire_timeout())
+        .idle_timeout(options.get_idle_timeout())
+        .max_lifetime(options.get_max_lifetime())
+        .connect_lazy_with(db_pool.connect_options().as_ref().clone())
 }
 
 async fn run_database_readiness_probe(
