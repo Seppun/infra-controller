@@ -824,6 +824,66 @@ mod bmc_mock_integration_tests {
         assert_eq!(fetch_failures, 0);
     }
 
+    /// Delta reports capacity as the *standard* `PowerCapacityWatts`, unlike
+    /// LiteOn's non-standard OEM string. This proves the existing
+    /// standard-field-wins branch in `discover_power_supplies` already
+    /// covers Delta with no vendor-specific code: `oem_capacity_watts` must
+    /// stay `None` for every supply, since the OEM fallback must never run
+    /// when the standard field is already present.
+    #[tokio::test]
+    async fn delta_supplies_resolve_capacity_from_standard_field() {
+        let h = bmc_mock::test_support::delta_powershelf_bmc().await;
+        let chassis = h
+            .service_root
+            .chassis()
+            .await
+            .expect("chassis collection")
+            .expect("chassis collection is present")
+            .members()
+            .await
+            .expect("chassis members")
+            .into_iter()
+            .next()
+            .expect("fixture has one chassis");
+        let collector = EntityDiscoveryCollector::<TestBmc> {
+            endpoint: Arc::new(test_endpoint(mac("00:11:22:33:44:66"))),
+            bmc: h.bmc.clone(),
+            shared: Arc::new(ArcSwapOption::empty()),
+            request_concurrency: 2,
+            collect_shelf_power: true,
+            gpu_identity: false,
+            generation: 0,
+        };
+        let fetch_failures = AtomicUsize::new(0);
+        let mut entities = Vec::new();
+        let mut sensor_ids = HashSet::new();
+        collector
+            .discover_power_supplies(
+                &Arc::new(chassis),
+                &fetch_failures,
+                &mut entities,
+                &mut sensor_ids,
+            )
+            .await;
+
+        let oem_fallbacks: Vec<_> = entities
+            .iter()
+            .filter_map(|entity| match entity {
+                DiscoveredEntity::PowerSupply {
+                    oem_capacity_watts, ..
+                } => Some(*oem_capacity_watts),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(oem_fallbacks.len(), 6, "Delta fixture exposes 6 PSU bays");
+        assert!(
+            oem_fallbacks.iter().all(Option::is_none),
+            "standard PowerCapacityWatts must win; OEM fallback must stay unused: {oem_fallbacks:?}"
+        );
+        assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
+    }
+
     /// Resolve a GPU identity for every processor the mock BMC exposes, keyed by
     /// processor id, and return the `@odata.id`s of the GPUs among them. Mirrors
     /// what the discovery collector does over the systems it enumerates.
