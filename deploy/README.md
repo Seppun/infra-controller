@@ -223,7 +223,7 @@ Path: `deploy/nico-base/dns/`
 ### NICo Hardware Health
 
 **Role**  
-`nico-hardware-health` continuously polls host and DPU BMCs for health information (fans, temperatures, leak sensors, etc.), exposes service metrics and per-sensor measurements via Prometheus, and notifies nico‑api when it detects problems so operators get alerts on failing hardware.
+`nico-hardware-health` continuously polls host and DPU BMCs for fan, temperature, and leak-sensor health. It exposes service metrics and per-sensor measurements in Prometheus format. It also reports problems to `nico-api` so operators can investigate failing hardware.
 
 **What it deploys**
 

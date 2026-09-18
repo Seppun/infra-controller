@@ -53,7 +53,7 @@ The green boxes in the architecture diagram are the services that NICo provides.
   overlay DHCP of a host with a managed DPU. The service is stateless and
   forwards requests to the API Service for IP address management.
 - **PXE Service** — serves boot artifacts (iPXE scripts, cloud-init user-data, OS images) to managed hosts and DPUs over HTTP. Fetches the correct artifact for each host from the API Service via mTLS/gRPC.
-- **Hardware Health** — scrapes host and DPU BMCs via Redfish HTTPS for sensor data (temperature, fan speed, power, current) and firmware inventory. Exposes service-level Prometheus metrics on `/metrics` and per-sensor measurements on `/telemetry`, and reports health alerts to the API Service via mTLS/gRPC.
+- **Hardware Health** — scrapes host and DPU BMCs over Redfish HTTPS for sensor data and firmware inventory. Service-level Prometheus metrics are available on `/metrics`, and per-sensor measurements are available on `/telemetry`. The service reports health alerts to the API Service over mTLS/gRPC.
 - **SSH Console Service** — maintains persistent SSH/IPMI connections to all host BMCs for serial console access. Streams console output to Loki for logging and provides live console access to tenants and administrators. Connects to the API Service via mTLS/gRPC.
 - **Authoritative DNS Service** — handles DNS queries from the site controller and managed nodes. Authoritative for NICo-delegated zones. Connects to the API Service via mTLS/gRPC.
 - **Recursive DNS (unbound)** — provides recursive DNS resolution to managed machines and tenant instances via the OOB network.
