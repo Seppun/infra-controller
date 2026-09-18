@@ -91,9 +91,13 @@ fn renewal_without_client_architecture_is_not_logged_as_error() -> Result<(), ey
 
     let mut renewal = DHCPFactory::base_relayed_message(idx, v4::MessageType::Request);
     renewal.set_ciaddr(lease_address);
-    renewal
-        .opts_mut()
-        .remove(v4::OptionCode::ClientSystemArchitecture);
+    assert!(
+        renewal
+            .opts_mut()
+            .remove(v4::OptionCode::ClientSystemArchitecture)
+            .is_some(),
+        "test fixture must include client-system-architecture before removal"
+    );
     let response = send_and_recv(&socket, renewal)?;
     assert_eq!(response.opts().msg_type(), Some(v4::MessageType::Ack));
 
