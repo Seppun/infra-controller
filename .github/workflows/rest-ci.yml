@@ -54,6 +54,8 @@ jobs:
               - '.github/ci/rest-command-*'
               - '.github/ci/rest_command_bundle.py'
               - '.github/ci/test_rest_command_bundle.py'
+              - '.github/ci/package-rest-helm.sh'
+              - '.github/ci/test-package-rest-helm.sh'
               - '.github/workflows/rest-*.yml'
               - 'helm/rest/**'
             core_proto:
