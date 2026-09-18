@@ -236,6 +236,7 @@ func TestDynTLSCfg(t *testing.T) {
 	caCertPool = x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM([]byte(test2Cert))
 	assert.True(t, caCertPool.Equal(sCfg.RootCAs))
+	assert.True(t, caCertPool.Equal(sCfg.ClientCAs))
 }
 
 // TestDynTLSCfg_RefreshClearsStickyError verifies that a successful refresh
@@ -271,4 +272,32 @@ func TestDynTLSCfg_RefreshClearsStickyError(t *testing.T) {
 	gotErr := d.err
 	d.Unlock()
 	assert.NoError(t, gotErr, "refresh() should clear sticky error from prior failed attempt")
+}
+
+func TestNewDynTLSCfg(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "tls.key")
+	require.NoError(t, os.WriteFile(key, []byte(test1Key), 0600))
+	cert := filepath.Join(dir, "tls.crt")
+	require.NoError(t, os.WriteFile(cert, []byte(test1Cert), 0644))
+	ca := filepath.Join(dir, "ca.crt")
+	require.NoError(t, os.WriteFile(ca, []byte("not a certificate"), 0644))
+
+	_, err := NewDynTLSCfg(key, cert, ca)
+	require.Error(t, err)
+}
+
+func TestDynTLSCfg_CloseIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "tls.key")
+	require.NoError(t, os.WriteFile(key, []byte(test1Key), 0600))
+	cert := filepath.Join(dir, "tls.crt")
+	require.NoError(t, os.WriteFile(cert, []byte(test1Cert), 0644))
+	ca := filepath.Join(dir, "ca.crt")
+	require.NoError(t, os.WriteFile(ca, []byte(testCaCert), 0644))
+
+	dynamicConfig, err := NewDynTLSCfg(key, cert, ca)
+	require.NoError(t, err)
+	dynamicConfig.Close()
+	assert.NotPanics(t, dynamicConfig.Close)
 }

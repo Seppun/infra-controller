@@ -40,6 +40,7 @@ type DynTLSCfg struct {
 	err      error
 	ticker   *time.Ticker
 	stop     chan bool
+	stopOnce sync.Once
 	logger   *logrus.Logger
 }
 
@@ -56,7 +57,9 @@ func NewDynTLSCfg(keyPath, certPath, cacertPath string) (*DynTLSCfg, error) {
 		return nil, err
 	}
 	d.caCertPool = x509.NewCertPool()
-	d.caCertPool.AppendCertsFromPEM(caCert)
+	if !d.caCertPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("failed to parse CA certificate %s", cacertPath)
+	}
 	d.cachedCa = caCert
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
@@ -82,7 +85,10 @@ func NewDynTLSCfg(keyPath, certPath, cacertPath string) (*DynTLSCfg, error) {
 
 // Close stops the poller go routine
 func (d *DynTLSCfg) Close() {
-	close(d.stop)
+	d.stopOnce.Do(func() {
+		d.ticker.Stop()
+		close(d.stop)
+	})
 }
 
 // WithTLSCfg allows a tls config to be passed in
@@ -132,6 +138,7 @@ func (d *DynTLSCfg) ServerCfg() *tls.Config {
 			d.cachedCfg = d.tlsCfg.Clone()
 			d.cachedCfg.Certificates = []tls.Certificate{*d.cachedCert}
 			d.cachedCfg.RootCAs = d.caCertPool
+			d.cachedCfg.ClientCAs = d.caCertPool
 			d.cacheUpdated = false
 		}
 
@@ -171,7 +178,11 @@ func (d *DynTLSCfg) refresh() {
 			d.logger.Warn("CA has changed, clients will likely not work without restart")
 		} else {
 			caCertPool := x509.NewCertPool()
-			caCertPool.AppendCertsFromPEM(caCert)
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				d.err = fmt.Errorf("failed to parse CA certificate %s", d.cacertPath)
+				d.logger.Error(d.err)
+				return
+			}
 			d.caCertPool = caCertPool
 			d.cachedCa = caCert
 			d.cacheUpdated = true

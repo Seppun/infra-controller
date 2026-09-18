@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
+	dynamictls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
 )
 
@@ -74,6 +75,27 @@ func ResolveServer(c pkgcerts.Config) (*tls.Config, string, error) {
 	return ServerTLSConfig()
 }
 
+// ResolveDynamicServer returns a periodically refreshed server-side TLS config,
+// its source description, and the refresh lifecycle owned by the caller.
+func ResolveDynamicServer(
+	c pkgcerts.Config,
+) (*tls.Config, string, *dynamictls.DynTLSCfg, error) {
+	if err := c.Validate(); err != nil {
+		return nil, "", nil, err
+	}
+
+	if c.IsSet() {
+		tlsConfig, dynamicConfig, err := c.DynamicServerTLSConfig()
+		return tlsConfig, c.CACert, dynamicConfig, err
+	}
+
+	return dynamicTLSConfigFromDir(
+		func(c pkgcerts.Config) (*tls.Config, *dynamictls.DynTLSCfg, error) {
+			return c.DynamicServerTLSConfig()
+		},
+	)
+}
+
 // TLSConfig resolves cert paths from the CERTDIR environment variable, falling
 // back to the k8s default /var/run/secrets/spiffe.io, and returns a client-side
 // tls.Config. Returns ErrNotPresent if no cert files are found.
@@ -82,6 +104,17 @@ func TLSConfig() (*tls.Config, string, error) {
 		func(c pkgcerts.Config) (*tls.Config, error) {
 			// Pass empty server name: gRPC derives it from the dial URL's hostname.
 			return c.TLSConfig("")
+		},
+	)
+}
+
+// DynamicTLSConfig resolves the deployment certificate paths and returns a
+// periodically refreshed client-side TLS config. The caller owns the returned
+// refresh lifecycle.
+func DynamicTLSConfig() (*tls.Config, string, *dynamictls.DynTLSCfg, error) {
+	return dynamicTLSConfigFromDir(
+		func(c pkgcerts.Config) (*tls.Config, *dynamictls.DynTLSCfg, error) {
+			return c.DynamicTLSConfig("")
 		},
 	)
 }
@@ -124,4 +157,29 @@ func tlsConfigFromDir(
 	}
 
 	return tlsConfig, certDir, nil
+}
+
+func dynamicTLSConfigFromDir(
+	build func(pkgcerts.Config) (*tls.Config, *dynamictls.DynTLSCfg, error),
+) (*tls.Config, string, *dynamictls.DynTLSCfg, error) {
+	certDir := os.Getenv("CERTDIR")
+	if certDir == "" {
+		certDir = defaultCertDir
+	}
+
+	tlsConfig, dynamicConfig, err := build(
+		pkgcerts.Config{
+			CACert:  filepath.Join(certDir, defaultCACert),
+			TLSCert: filepath.Join(certDir, defaultCertFile),
+			TLSKey:  filepath.Join(certDir, defaultKeyFile),
+		},
+	)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, certDir, nil, ErrNotPresent
+		}
+		return nil, certDir, nil, fmt.Errorf("loading certs from %q: %w", certDir, err)
+	}
+
+	return tlsConfig, certDir, dynamicConfig, nil
 }

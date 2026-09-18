@@ -104,6 +104,17 @@ func TestTLSConfig(t *testing.T) {
 	})
 }
 
+func TestDynamicTLSConfig(t *testing.T) {
+	dir := generateTestCerts(t)
+	t.Setenv("CERTDIR", dir)
+
+	tlsConfig, source, dynamicConfig, err := DynamicTLSConfig()
+	require.NoError(t, err)
+	defer dynamicConfig.Close()
+	assert.Equal(t, dir, source)
+	assert.NotNil(t, tlsConfig.GetClientCertificate)
+}
+
 func TestServerTLSConfig(t *testing.T) {
 	t.Run("CERTDIR set with valid certs", func(t *testing.T) {
 		dir := generateTestCerts(t)
@@ -252,4 +263,23 @@ func TestResolveServer(t *testing.T) {
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, ErrNotPresent)
 	})
+}
+
+func TestResolveDynamicServer(t *testing.T) {
+	dir := generateTestCerts(t)
+	c := pkgcerts.Config{
+		CACert:  filepath.Join(dir, defaultCACert),
+		TLSCert: filepath.Join(dir, defaultCertFile),
+		TLSKey:  filepath.Join(dir, defaultKeyFile),
+	}
+
+	tlsConfig, source, dynamicConfig, err := ResolveDynamicServer(c)
+	require.NoError(t, err)
+	defer dynamicConfig.Close()
+	assert.Equal(t, c.CACert, source)
+
+	currentConfig, err := tlsConfig.GetConfigForClient(nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, currentConfig.Certificates)
+	assert.NotNil(t, currentConfig.ClientCAs)
 }

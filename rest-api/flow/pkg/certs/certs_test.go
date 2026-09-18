@@ -221,3 +221,35 @@ func TestConfig_ServerTLSConfig(t *testing.T) {
 		assert.ErrorIs(t, err, os.ErrNotExist)
 	})
 }
+
+func TestConfig_DynamicTLSConfig(t *testing.T) {
+	caFile, certFile, keyFile := generateTestCerts(t)
+	tlsConfig, dynamicConfig, err := Config{
+		CACert:  caFile,
+		TLSCert: certFile,
+		TLSKey:  keyFile,
+	}.DynamicTLSConfig("temporal.example.com")
+	require.NoError(t, err)
+	defer dynamicConfig.Close()
+
+	assert.NotNil(t, tlsConfig.RootCAs)
+	assert.NotNil(t, tlsConfig.GetClientCertificate)
+	assert.Equal(t, "temporal.example.com", tlsConfig.ServerName)
+}
+
+func TestConfig_DynamicServerTLSConfig(t *testing.T) {
+	caFile, certFile, keyFile := generateTestCerts(t)
+	tlsConfig, dynamicConfig, err := Config{
+		CACert:  caFile,
+		TLSCert: certFile,
+		TLSKey:  keyFile,
+	}.DynamicServerTLSConfig()
+	require.NoError(t, err)
+	defer dynamicConfig.Close()
+
+	currentConfig, err := tlsConfig.GetConfigForClient(nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, currentConfig.Certificates)
+	assert.NotNil(t, currentConfig.ClientCAs)
+	assert.Equal(t, tls.RequireAndVerifyClientCert, currentConfig.ClientAuth)
+}
