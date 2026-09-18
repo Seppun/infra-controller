@@ -146,7 +146,17 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
         let mut entities = Vec::new();
         let mut sensor_ids = HashSet::new();
 
-        if let Some(systems) = service_root.systems().await? {
+        // A power shelf has no ComputerSystems, and Delta shelves do not serve
+        // `/redfish/v1/Systems` at all. nv-redfish files a vendor-less Redfish
+        // 1.9.0 service root under its anonymous quirk bucket and guesses that
+        // URL when the root omits it, so asking would turn the 404 into a fatal
+        // iteration and hide every supply of the shelf.
+        let systems = if self.collect_shelf_power {
+            None
+        } else {
+            service_root.systems().await?
+        };
+        if let Some(systems) = systems {
             for system in systems.members().await? {
                 let system = Arc::new(system);
 
@@ -909,6 +919,101 @@ mod bmc_mock_integration_tests {
             );
         }
 
+        assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
+    }
+
+    /// A Delta shelf advertises no `Systems` collection and answers 404 at
+    /// `/redfish/v1/Systems`. nv-redfish files a vendor-less Redfish 1.9.0
+    /// service root under its anonymous quirk bucket and guesses that URL
+    /// anyway, so a full discovery iteration must not turn the 404 into a
+    /// fatal error: the six supplies and the shelf chassis must still be
+    /// published.
+    #[tokio::test]
+    async fn delta_shelf_full_discovery_publishes_supplies_without_systems() {
+        let h = bmc_mock::test_support::delta_powershelf_bmc().await;
+        let collector = EntityDiscoveryCollector::<TestBmc> {
+            endpoint: Arc::new(test_endpoint(mac("00:11:22:33:44:68"))),
+            bmc: h.bmc.clone(),
+            shared: Arc::new(ArcSwapOption::empty()),
+            request_concurrency: 2,
+            collect_shelf_power: true,
+            gpu_identity: false,
+            generation: 0,
+        };
+        let fetch_failures = AtomicUsize::new(0);
+
+        let entities = collector
+            .discover_entities(&fetch_failures)
+            .await
+            .expect("a shelf without /redfish/v1/Systems must still be discovered");
+
+        let supplies = entities
+            .iter()
+            .filter(|entity| matches!(entity, DiscoveredEntity::PowerSupply { .. }))
+            .count();
+        let shelf_chassis = entities
+            .iter()
+            .filter(|entity| {
+                matches!(
+                    entity,
+                    DiscoveredEntity::Chassis {
+                        shelf_power: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(supplies, 6, "Delta fixture exposes 6 PSU bays");
+        assert_eq!(
+            shelf_chassis, 1,
+            "the shelf chassis carries the shelf power evidence"
+        );
+        assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
+    }
+
+    /// LiteOn shelves do serve `/redfish/v1/Systems`, holding a system with no
+    /// processors, memory or drives. Skipping the Systems lookup on shelf
+    /// endpoints must leave what discovery publishes for them unchanged.
+    #[tokio::test]
+    async fn liteon_shelf_full_discovery_publishes_supplies() {
+        let h = liteon_powershelf_bmc().await;
+        let collector = EntityDiscoveryCollector::<TestBmc> {
+            endpoint: Arc::new(test_endpoint(mac("00:11:22:33:44:69"))),
+            bmc: h.bmc.clone(),
+            shared: Arc::new(ArcSwapOption::empty()),
+            request_concurrency: 2,
+            collect_shelf_power: true,
+            gpu_identity: false,
+            generation: 0,
+        };
+        let fetch_failures = AtomicUsize::new(0);
+
+        let entities = collector
+            .discover_entities(&fetch_failures)
+            .await
+            .expect("LiteOn shelf discovery");
+
+        let supplies = entities
+            .iter()
+            .filter(|entity| matches!(entity, DiscoveredEntity::PowerSupply { .. }))
+            .count();
+        let shelf_chassis = entities
+            .iter()
+            .filter(|entity| {
+                matches!(
+                    entity,
+                    DiscoveredEntity::Chassis {
+                        shelf_power: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(supplies, 6, "LiteOn fixture exposes 6 PSU bays");
+        assert_eq!(
+            shelf_chassis, 1,
+            "the shelf chassis carries the shelf power evidence"
+        );
         assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
     }
 
