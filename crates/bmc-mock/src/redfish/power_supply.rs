@@ -107,6 +107,29 @@ impl PowerSupplyBuilder {
         }))
     }
 
+    /// Standard Redfish per-PSU capacity. Delta reports capacity this way
+    /// (unlike LiteOn's non-standard OEM string); any vendor can use it.
+    pub(crate) fn power_capacity_watts(self, v: f64) -> Self {
+        self.apply_patch(json!({"PowerCapacityWatts": v}))
+    }
+
+    /// Sets `Oem.deltaenergysystems.FanSpeedTarget` without disturbing
+    /// `Power` set by a prior `oem_delta_power_state` call; JSON-patch merges
+    /// the two into one `Oem.deltaenergysystems` object. Call this *after*
+    /// `oem_delta_power_state` in any builder chain: `oem_delta_power_state`
+    /// hardcodes `FanSpeedTarget: 0` in its own patch, so calling this method
+    /// first would have its value overwritten back to 0 by a later
+    /// `oem_delta_power_state` call.
+    pub(crate) fn oem_delta_fan_speed_target(self, v: i64) -> Self {
+        self.apply_patch(json!({
+            "Oem": {
+                "deltaenergysystems": {
+                    "FanSpeedTarget": v
+                }
+            }
+        }))
+    }
+
     pub(crate) fn status(self, status: redfish::resource::Status) -> Self {
         self.apply_patch(json!({
             "Status": status.into_json()
