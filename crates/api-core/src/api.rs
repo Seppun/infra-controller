@@ -1785,6 +1785,13 @@ impl Forge for Api {
         crate::handlers::expected_machine::update(self, request).await
     }
 
+    async fn patch_expected_machine(
+        &self,
+        request: Request<rpc::PatchExpectedMachineRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_machine::patch_expected_machine(self, request).await
+    }
+
     async fn replace_all_expected_machines(
         &self,
         request: Request<rpc::ExpectedMachineList>,
@@ -1834,6 +1841,13 @@ impl Forge for Api {
         crate::handlers::expected_machine::update_expected_machines(self, request).await
     }
 
+    async fn patch_expected_machines(
+        &self,
+        request: Request<rpc::PatchExpectedMachinesRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_machine::patch_expected_machines(self, request).await
+    }
+
     async fn get_expected_power_shelf(
         &self,
         request: Request<rpc::ExpectedPowerShelfRequest>,
@@ -1860,6 +1874,13 @@ impl Forge for Api {
         request: Request<rpc::ExpectedPowerShelf>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_power_shelf::update_expected_power_shelf(self, request).await
+    }
+
+    async fn patch_expected_power_shelf(
+        &self,
+        request: Request<rpc::PatchExpectedPowerShelfRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_power_shelf::patch_expected_power_shelf(self, request).await
     }
 
     async fn replace_all_expected_power_shelves(
@@ -1919,6 +1940,13 @@ impl Forge for Api {
         request: Request<rpc::ExpectedSwitch>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_switch::update_expected_switch(self, request).await
+    }
+
+    async fn patch_expected_switch(
+        &self,
+        request: Request<rpc::PatchExpectedSwitchRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_switch::patch_expected_switch(self, request).await
     }
 
     async fn replace_all_expected_switches(
@@ -3816,7 +3844,6 @@ pub struct DefaultCredential {
 
 #[cfg(any(test, feature = "test-support"))]
 impl DefaultCredential {
-    #[cfg(feature = "test-support")]
     pub(crate) fn key(&self) -> &str {
         &self._key
     }
