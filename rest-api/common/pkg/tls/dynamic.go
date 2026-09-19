@@ -4,8 +4,10 @@
 package tls
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,9 +58,9 @@ func NewDynTLSCfg(keyPath, certPath, cacertPath string) (*DynTLSCfg, error) {
 	if err != nil {
 		return nil, err
 	}
-	d.caCertPool = x509.NewCertPool()
-	if !d.caCertPool.AppendCertsFromPEM(caCert) {
-		return nil, fmt.Errorf("failed to parse CA certificate %s", cacertPath)
+	d.caCertPool, err = parseCABundle(caCert)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CA certificate %s: %w", cacertPath, err)
 	}
 	d.cachedCa = caCert
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
@@ -81,6 +83,44 @@ func NewDynTLSCfg(keyPath, certPath, cacertPath string) (*DynTLSCfg, error) {
 	d.logger.SetReportCaller(true)
 	go d.pollCerts()
 	return d, nil
+}
+
+// parseCABundle rejects partially parseable bundles while ignoring auxiliary PEM blocks.
+func parseCABundle(data []byte) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	count := 0
+	marker := []byte("-----BEGIN CERTIFICATE-----")
+	for len(data) > 0 {
+		block, rest := pem.Decode(data)
+		if block == nil {
+			if bytes.Contains(data, marker) {
+				return nil, fmt.Errorf("malformed certificate PEM block")
+			}
+			break
+		}
+		// pem.Decode may silently skip malformed PEM before a valid block.
+		begins := bytes.Count(data[:len(data)-len(rest)], marker)
+		data = rest
+		if block.Type != "CERTIFICATE" {
+			if begins != 0 {
+				return nil, fmt.Errorf("malformed certificate PEM block")
+			}
+			continue
+		}
+		if begins != 1 || len(block.Headers) != 0 {
+			return nil, fmt.Errorf("malformed certificate PEM block")
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("invalid certificate: %w", err)
+		}
+		pool.AddCert(cert)
+		count++
+	}
+	if count == 0 {
+		return nil, fmt.Errorf("CA bundle contains no certificates")
+	}
+	return pool, nil
 }
 
 // Close stops the poller go routine
@@ -177,9 +217,9 @@ func (d *DynTLSCfg) refresh() {
 			// just log a warning
 			d.logger.Warn("CA has changed, clients will likely not work without restart")
 		} else {
-			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				d.err = fmt.Errorf("failed to parse CA certificate %s", d.cacertPath)
+			caCertPool, err := parseCABundle(caCert)
+			if err != nil {
+				d.err = fmt.Errorf("failed to parse CA certificate %s: %w", d.cacertPath, err)
 				d.logger.Error(d.err)
 				return
 			}
